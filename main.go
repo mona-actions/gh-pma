@@ -28,7 +28,11 @@ var (
 	GithubSourcePat string
 	GithubTargetPat string
 	NoSslVerify     = false
-	Description     = "Post-Migration Audit (PMA) Extension For GitHub CLI. Used to compare GitHub Enterprise (Server or Cloud) to GitHub Enterprise Cloud (includes Managed Users) migrations."
+	Description     = fmt.Sprint(
+		"Post-Migration Audit (PMA) Extension For GitHub CLI. Used to compare ",
+		"GitHub Enterprise (Server or Cloud) to GitHub Enterprise Cloud (includes ",
+		"Managed Users) migrations.",
+	)
 
 	// tool vars
 	DefaultApiUrl    string = "github.com"
@@ -40,13 +44,11 @@ var (
 			Repositories repositoriesPage `graphql:"repositories(first: 100, after: $page, orderBy: {field: NAME, direction: ASC})"`
 		} `graphql:"organization(login: $owner)"`
 	}
-	Repositories        []repository = []repository{}
-	LogFile             *os.File
-	OutputFile          string
-	PageLimit           = 100
-	Threads             int
-	WebhookResultsTable pterm.TableData
-	WaitGroup           sync.WaitGroup
+	Repositories []repository = []repository{}
+	LogFile      *os.File
+	Threads      int
+	ResultsTable pterm.TableData
+	WaitGroup    sync.WaitGroup
 
 	// Create some colors and a spinner
 	Red     = color.New(color.FgRed).SprintFunc()
@@ -81,22 +83,46 @@ type apiResponse struct {
 	Message string
 	Rate    rateResponse
 }
+type environments struct {
+	Environments []environment
+}
+type environment struct {
+	Name string
+}
 type repositoriesPage struct {
 	PageInfo struct {
 		HasNextPage bool
 		EndCursor   graphql.String
 	}
-	Nodes []repository
+	Nodes []repositoryNode
 }
-type repository struct {
+type repositoryNode struct {
 	Name          string
 	NameWithOwner string
 	Owner         organization
 	Description   string
 	URL           string
 }
+type repository struct {
+	NameWithOwner string
+	Secrets       int
+	Variables     int
+	Environments  int
+}
 type organization struct {
 	Login string
+}
+type secrets struct {
+	Secrets []secret
+}
+type secret struct {
+	Name string
+}
+type variables struct {
+	Variables []secret
+}
+type variable struct {
+	Name string
 }
 type user struct {
 	Login string
@@ -151,12 +177,6 @@ func init() {
 			"certificate then setting this flag will allow data to be extracted.",
 		),
 	)
-	rootCmd.PersistentFlags().StringVar(
-		&OutputFile,
-		"output-file",
-		"results.csv",
-		"The file to output the results to.",
-	)
 	rootCmd.PersistentFlags().IntVarP(
 		&Threads,
 		"threads",
@@ -170,7 +190,7 @@ func init() {
 
 	// make certain flags required
 	rootCmd.MarkPersistentFlagRequired("github-source-org")
-	rootCmd.MarkPersistentFlagRequired("github-target-org")
+	//rootCmd.MarkPersistentFlagRequired("github-target-org")
 
 	// add args here
 	rootCmd.Args = cobra.MaximumNArgs(0)
@@ -187,6 +207,12 @@ func ExitOnError(err error) {
 		rootCmd.PrintErrln(err.Error())
 		os.Exit(1)
 	}
+}
+
+func ExitManual(err error) {
+	Spinner.Stop()
+	fmt.Println(err.Error())
+	os.Exit(1)
 }
 
 func OutputFlags(key string, value string) {
@@ -368,7 +394,9 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	if ApiUrl != DefaultApiUrl {
 		OutputFlags("GHES Source URL", ApiUrl)
 	}
-	OutputFlags("GitHub Target Org", GithubTargetOrg)
+	if GithubTargetOrg != "" {
+		OutputFlags("GitHub Target Org", GithubTargetOrg)
+	}
 	if NoSslVerify {
 		OutputFlags("SSL Verification Disabled", strconv.FormatBool(NoSslVerify))
 	}
@@ -428,8 +456,12 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		// make the graphql request
 		GraphqlClient.Query("RepoList", &RepositoryQuery, variables)
 
-		// append repositories found to array
-		Repositories = append(Repositories, RepositoryQuery.Organization.Repositories.Nodes...)
+		// clone the objects (keeping just the name)
+		for _, repoNode := range RepositoryQuery.Organization.Repositories.Nodes {
+			var repoClone repository
+			repoClone.NameWithOwner = repoNode.NameWithOwner
+			Repositories = append(Repositories, repoClone)
+		}
 
 		// if no next page is found, break
 		if !RepositoryQuery.Organization.Repositories.PageInfo.HasNextPage {
@@ -441,11 +473,12 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		variables["page"] = &RepositoryQuery.Organization.Repositories.PageInfo.EndCursor
 	}
 
+	Debug(fmt.Sprintf("Found %d repositories", len(Repositories)))
 	Debug("---- GETTING REPOSITORY DATA ----")
 
 	// set up table header for displaying of data
 	Debug("Creating table data for display...")
-	WebhookResultsTable = pterm.TableData{
+	ResultsTable = pterm.TableData{
 		{
 			"Repository",
 			"Secrets",
@@ -495,7 +528,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 					"Running thread %d of %d on repository '%s'",
 					i+1,
 					len(batch),
-					batch[i].Name,
+					batch[i].NameWithOwner,
 				),
 			)
 			go GetRepositoryStatistics(batch[i])
@@ -509,7 +542,44 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	Spinner.Stop()
 
 	// output table
-	pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(WebhookResultsTable).Render()
+	if len(Repositories) > 0 {
+		pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(ResultsTable).Render()
+	} else {
+		OutputNotice("No repositories found.")
+		LF()
+	}
+
+	// Create output file
+	outputFile, err := os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".", GithubSourceOrg, ".csv"))
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+
+	// write header
+	_, err = outputFile.WriteString(
+		fmt.Sprintln("repository,secrets,variables,environments"),
+	)
+	if err != nil {
+		OutputError("Error writing to output file.", true)
+	}
+	// write body
+	for _, repository := range Repositories {
+		_, err = outputFile.WriteString(
+			fmt.Sprintln(
+				fmt.Sprintf(
+					"%s,%d,%d,%d",
+					repository.NameWithOwner,
+					repository.Secrets,
+					repository.Variables,
+					repository.Environments,
+				),
+			),
+		)
+		if err != nil {
+			OutputError("Error writing to output file.", true)
+		}
+	}
 
 	// always return
 	return err
@@ -580,12 +650,98 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 
 func GetRepositoryStatistics(repoToProcess repository) {
 
-	// write to table for output
-	WebhookResultsTable = append(WebhookResultsTable, []string{
+	Debug("is this working?")
+
+	// validate we have API attempts left
+	timeoutErr := ValidateApiRate(SourceRestClient, "core")
+	if timeoutErr != nil {
+		OutputError(timeoutErr.Error(), true)
+	}
+
+	// get number of secrets
+	secretCount := 0
+	var secretsResponse secrets
+	secretsErr := SourceRestClient.Get(
+		fmt.Sprintf(
+			"repos/%s/actions/secrets",
+			repoToProcess.NameWithOwner,
+		),
+		&secretsResponse,
+	)
+	Debug(fmt.Sprintf(
+		"Secrets from %s: %v",
 		repoToProcess.NameWithOwner,
-		"0",
-		"0",
-		"0",
+		secretsResponse,
+	))
+	if secretsErr != nil {
+		ExitManual(secretsErr)
+	} else {
+		secretCount = len(secretsResponse.Secrets)
+		repoToProcess.Secrets = secretCount
+	}
+
+	// validate we have API attempts left
+	timeoutErr = ValidateApiRate(SourceRestClient, "core")
+	if timeoutErr != nil {
+		OutputError(timeoutErr.Error(), true)
+	}
+
+	// get number of variables
+	variableCount := 0
+	var variablesResponse variables
+	variablesErr := SourceRestClient.Get(
+		fmt.Sprintf(
+			"repos/%s/actions/variables",
+			repoToProcess.NameWithOwner,
+		),
+		&variablesResponse,
+	)
+	Debug(fmt.Sprintf(
+		"Variables from %s: %v",
+		repoToProcess.NameWithOwner,
+		variablesResponse,
+	))
+	if variablesErr != nil {
+		ExitManual(variablesErr)
+	} else {
+		variableCount = len(variablesResponse.Variables)
+		repoToProcess.Variables = variableCount
+	}
+
+	// validate we have API attempts left
+	timeoutErr = ValidateApiRate(SourceRestClient, "core")
+	if timeoutErr != nil {
+		OutputError(timeoutErr.Error(), true)
+	}
+
+	// get number of variables
+	envCount := 0
+	var envResponse environments
+	envsErr := SourceRestClient.Get(
+		fmt.Sprintf(
+			"repos/%s/environments",
+			repoToProcess.NameWithOwner,
+		),
+		&envResponse,
+	)
+	Debug(fmt.Sprintf(
+		"Environments from %s: %v",
+		repoToProcess.NameWithOwner,
+		envResponse,
+	))
+	if envsErr != nil {
+		ExitManual(envsErr)
+	} else {
+		envCount = len(envResponse.Environments)
+		repoToProcess.Environments = envCount
+	}
+
+	// write to table for output
+	ResultsTable = append(ResultsTable, []string{
+		repoToProcess.NameWithOwner,
+		fmt.Sprintf("%d", secretCount),
+		fmt.Sprintf("%d", variableCount),
+		fmt.Sprintf("%d", envCount),
 	})
 
 	// find index of repo in original list and overwite it
@@ -596,13 +752,16 @@ func GetRepositoryStatistics(repoToProcess repository) {
 		OutputError(
 			fmt.Sprintf(
 				"Error finding batch repository in original list: %s",
-				repoToProcess.Name,
+				repoToProcess.NameWithOwner,
 			),
 			false,
 		)
 	} else {
 		Repositories[idx] = repoToProcess
 	}
+
+	// sleep for a second to avoid rate limiting
+	time.Sleep(time.Duration(1))
 
 	// close out this thread
 	WaitGroup.Done()
