@@ -41,7 +41,7 @@ var (
 	GraphqlClient    api.GQLClient
 	RepositoryQuery  struct {
 		Organization struct {
-			Repositories repositoriesPage `graphql:"repositories(first: 1, after: $page, orderBy: {field: NAME, direction: ASC})"`
+			Repositories repositoriesPage `graphql:"repositories(first: 100, after: $page, orderBy: {field: NAME, direction: ASC})"`
 		} `graphql:"organization(login: $owner)"`
 	}
 	Repositories []repository = []repository{}
@@ -62,7 +62,7 @@ var (
 		Use:           "gh pma",
 		Short:         Description,
 		Long:          Description,
-		Version:       "0.0.2",
+		Version:       "0.0.3",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          Process,
@@ -165,17 +165,6 @@ func init() {
 		"github-target-pat",
 		"",
 		"",
-	)
-	rootCmd.PersistentFlags().BoolVar(
-		&NoSslVerify,
-		"no-ssl-verify",
-		false,
-		fmt.Sprint(
-			"Only effective if migrating from GHES. Disables SSL verification when ",
-			"communicating with your GHES instance. All other migration steps will ",
-			"continue to verify SSL. If your GHES instance has a self-signed SSL ",
-			"certificate then setting this flag will allow data to be extracted.",
-		),
 	)
 	rootCmd.PersistentFlags().IntVarP(
 		&Threads,

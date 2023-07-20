@@ -48,8 +48,6 @@ Flags:
       --github-target-org string   Uses GH_PAT env variable or --github-target-pat option.
       --github-target-pat string   
   -h, --help                       help for gh
-      --no-ssl-verify              Only effective if migrating from GHES. Disables SSL verification when communicating with your GHES instance. All other migration steps will continue to verify SSL. If your GHES instance has a self-signed SSL certificate then setting this flag will allow data to be extracted.
-      --output-file string         The file to output the results to. (default "results.csv")
   -t, --threads int                Number of threads to process concurrently. Maximum of 10 allowed. Increasing this number could get your PAT blocked due to API limiting. (default 3)
   -v, --version                    version for gh
 ```
