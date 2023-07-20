@@ -41,7 +41,7 @@ var (
 	GraphqlClient    api.GQLClient
 	RepositoryQuery  struct {
 		Organization struct {
-			Repositories repositoriesPage `graphql:"repositories(first: 100, after: $page, orderBy: {field: NAME, direction: ASC})"`
+			Repositories repositoriesPage `graphql:"repositories(first: 1, after: $page, orderBy: {field: NAME, direction: ASC})"`
 		} `graphql:"organization(login: $owner)"`
 	}
 	Repositories []repository = []repository{}
@@ -62,7 +62,7 @@ var (
 		Use:           "gh pma",
 		Short:         Description,
 		Long:          Description,
-		Version:       "0.0.1",
+		Version:       "0.0.2",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          Process,
@@ -428,6 +428,12 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 	Spinner.Start()
 
+	// get our variables set up for the graphql query
+	variables := map[string]interface{}{
+		"owner": graphql.String(GithubSourceOrg),
+		"page":  (*graphql.String)(nil),
+	}
+
 	// Loop through pages of repositories, waiting 1 second in between
 	var i = 1
 	for {
@@ -447,12 +453,6 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 			),
 		)
 
-		// get our variables set up for the graphql query
-		variables := map[string]interface{}{
-			"owner": graphql.String(GithubSourceOrg),
-			"page":  (*graphql.String)(nil),
-		}
-
 		// make the graphql request
 		GraphqlClient.Query("RepoList", &RepositoryQuery, variables)
 
@@ -462,6 +462,8 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 			repoClone.NameWithOwner = repoNode.NameWithOwner
 			Repositories = append(Repositories, repoClone)
 		}
+
+		Debug(fmt.Sprintf("%v", RepositoryQuery.Organization.Repositories))
 
 		// if no next page is found, break
 		if !RepositoryQuery.Organization.Repositories.PageInfo.HasNextPage {
