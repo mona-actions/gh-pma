@@ -1,0 +1,7 @@
+/gh-pma
+/gh-pma.exe
+/*.log
+.DS_Store
+thumbs.DB
+.env
+results.csv
