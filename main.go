@@ -314,6 +314,10 @@ func GetOpts(hostname, token string) (options api.ClientOptions) {
 	return opts
 }
 
+func LF() {
+	fmt.Println("")
+}
+
 func Log(message string) {
 	if message != "" {
 		message = fmt.Sprint(
@@ -414,6 +418,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 			),
 		)
 	}
+	LF()
 
 	// output flags for reference
 	OutputFlags("GitHub Source Org", GithubSourceOrg)
@@ -427,6 +432,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		OutputFlags("SSL Verification Disabled", strconv.FormatBool(NoSslVerify))
 	}
 	OutputFlags("Threads", fmt.Sprintf("%d", Threads))
+	LF()
 	Debug("---- LISTING REPOSITORIES ----")
 
 	// set up clients
@@ -557,6 +563,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	} else {
 		OutputNotice("No repositories found.")
 	}
+	LF()
 
 	// Create output file
 	outputFile, err := os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".", GithubSourceOrg, ".csv"))
@@ -603,7 +610,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		// auto confirm
 		c := true
 		if !AutoConfirm {
-			c, err = AskForConfirmation(Yellow(proceedMessage))
+			c, err = AskForConfirmation(Pink(proceedMessage))
 		}
 
 		// fail if something goes wrong
@@ -709,6 +716,9 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
+
+	// start timer
+	start := time.Now()
 
 	// get number of secrets
 	secretCount := 0
@@ -829,9 +839,9 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	)
 	existsInTarget := strconv.FormatBool(repoToProcess.ExistsInTarget)
 	if !repoToProcess.ExistsInTarget {
-		existsInTarget = Red(existsInTarget)
+		existsInTarget = Pink(existsInTarget)
 	} else if repoToProcess.Visibility != TargetRepositories[targetIdx].Visibility {
-		visiblity = Yellow(visiblity)
+		visiblity = Pink(visiblity)
 	}
 	ResultsTable = append(ResultsTable, []string{
 		repoToProcess.NameWithOwner,
@@ -842,8 +852,12 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 		fmt.Sprintf("%d", envCount),
 	})
 
-	// sleep for a second to avoid rate limiting
-	time.Sleep(time.Duration(1))
+	// delay if write was fast
+	elapsed := time.Since(start)
+	if elapsed.Seconds() < 0.5 {
+		Debug(fmt.Sprintf("Execution time was %v. Waiting for 500 miliseconds to avoid rate limiting.", elapsed.Seconds()))
+		time.Sleep(500 * time.Millisecond)
+	}
 
 	// close out this thread
 	WaitGroup.Done()
@@ -981,8 +995,9 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 
 		// delay if write was fast
 		elapsed := time.Since(start)
-		if elapsed < 1 {
-			time.Sleep(1)
+		if elapsed.Seconds() < 1 {
+			Debug(fmt.Sprintf("Execution time was %v. Waiting for 1 second to avoid rate limiting.", elapsed.Seconds()))
+			time.Sleep(1 * time.Second)
 		}
 	}
 
