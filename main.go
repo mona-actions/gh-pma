@@ -200,6 +200,11 @@ func init() {
 	rootCmd.MarkPersistentFlagRequired("github-source-org")
 	rootCmd.MarkPersistentFlagRequired("github-target-org")
 
+	// update version template to show extension name
+	rootCmd.SetVersionTemplate(
+		fmt.Sprintf("PMA Extension for GitHub CLI, v%s\n", rootCmd.Version),
+	)
+
 	// add args here
 	rootCmd.Args = cobra.MaximumNArgs(0)
 }
