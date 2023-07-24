@@ -65,7 +65,7 @@ var (
 		Use:           "gh pma",
 		Short:         Description,
 		Long:          Description,
-		Version:       "0.0.4",
+		Version:       "0.0.5",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          Process,
@@ -937,6 +937,12 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 
 	var response interface{}
 	for _, repository := range reposToProcess {
+
+		// validate rate
+		err := ValidateApiRate(client, "core")
+		if err != nil {
+			return err
+		}
 
 		// create json body
 		requestbody, err := json.Marshal(map[string]string{
