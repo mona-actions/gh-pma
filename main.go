@@ -251,7 +251,7 @@ func Output(message string, color string, isErr bool, exit bool) {
 	if isErr {
 		message = fmt.Sprint("[ERROR] ", message)
 	}
-	Log(message)
+	Log(StripAnsi(message))
 
 	switch {
 	case color == "red":
@@ -358,6 +358,12 @@ func Truncate(str string, limit int) string {
 		}
 	}
 	return str
+}
+
+func StripAnsi(str string) string {
+	ansi := "[\u001B\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PRZcf-ntqry=><~]))"
+	regex := regexp.MustCompile(ansi)
+	return regex.ReplaceAllString(str, "")
 }
 
 func Process(cmd *cobra.Command, args []string) (err error) {
@@ -563,8 +569,8 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(ResultsTable).Render()
 	} else {
 		OutputNotice("No repositories found.")
+		return err
 	}
-	LF()
 
 	// Create output file
 	outputFile, err := os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".", GithubSourceOrg, ".csv"))
@@ -643,19 +649,26 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
+	// validate we have API attempts left
+	rateLeft, _ := ValidateApiRate(SourceRestClient, "core")
+	rateMessage := Cyan("API Rate Limit Left:")
+	OutputNotice(fmt.Sprintf("%s %d", rateMessage, rateLeft))
+	LF()
+
 	// always return
 	return err
 }
 
-func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
+func ValidateApiRate(client api.RESTClient, requestType string) (left int, err error) {
 	apiResponse := apiResponse{}
 	attempts := 0
+	rateRemaining := 0
 
 	for {
 
 		// after 240 attempts (1 hour), end the scrip.
 		if attempts >= 240 {
-			return errors.New(
+			return 0, errors.New(
 				fmt.Sprint(
 					"After an hour of retrying, the API rate limit has not ",
 					"refreshed. Aborting.",
@@ -667,19 +680,18 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 		err = client.Get("rate_limit", &apiResponse)
 		if err != nil {
 			Debug("Failed to get rate limit from GitHub server.")
-			return err
+			return 0, err
 		}
 
 		// if rate limiting is disabled, do not proceed
 		if apiResponse.Message == "Rate limiting is not enabled." {
 			Debug("Rate limit is not enabled.")
-			return err
+			return 0, err
 		}
 		// choose which response to validate
-		rateRemaining := 0
 		switch {
 		default:
-			return errors.New(
+			return 0, errors.New(
 				fmt.Sprintf(
 					"Invalid API request type provided: '%s'",
 					requestType,
@@ -707,13 +719,13 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 			break
 		}
 	}
-	return err
+	return rateRemaining, err
 }
 
 func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 
 	// validate we have API attempts left
-	timeoutErr := ValidateApiRate(client, "core")
+	_, timeoutErr := ValidateApiRate(client, "core")
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
@@ -744,7 +756,8 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	}
 
 	// validate we have API attempts left
-	timeoutErr = ValidateApiRate(client, "core")
+
+	_, timeoutErr = ValidateApiRate(client, "core")
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
@@ -772,7 +785,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	}
 
 	// validate we have API attempts left
-	timeoutErr = ValidateApiRate(client, "core")
+	_, timeoutErr = ValidateApiRate(client, "core")
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
@@ -914,7 +927,7 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 	for {
 
 		// validate we have API attempts left
-		err := ValidateApiRate(restClient, "graphql")
+		_, err := ValidateApiRate(restClient, "graphql")
 		if err != nil {
 			OutputError(err.Error(), true)
 		}
@@ -961,7 +974,7 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 	for _, repository := range reposToProcess {
 
 		// validate rate
-		err := ValidateApiRate(client, "core")
+		_, err := ValidateApiRate(client, "core")
 		if err != nil {
 			return err
 		}
