@@ -64,7 +64,7 @@ var (
 		Use:           "gh pma",
 		Short:         Description,
 		Long:          Description,
-		Version:       "0.0.5",
+		Version:       "0.0.6",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          Process,
