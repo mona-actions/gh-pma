@@ -610,7 +610,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		// auto confirm
 		c := true
 		if !AutoConfirm {
-			c, err = AskForConfirmation(Pink(proceedMessage))
+			c, err = AskForConfirmation(Yellow(proceedMessage))
 		}
 
 		// fail if something goes wrong
@@ -839,9 +839,9 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	)
 	existsInTarget := strconv.FormatBool(repoToProcess.ExistsInTarget)
 	if !repoToProcess.ExistsInTarget {
-		existsInTarget = Pink(existsInTarget)
+		existsInTarget = Red(existsInTarget)
 	} else if repoToProcess.Visibility != TargetRepositories[targetIdx].Visibility {
-		visiblity = Pink(visiblity)
+		visiblity = Yellow(visiblity)
 	}
 	ResultsTable = append(ResultsTable, []string{
 		repoToProcess.NameWithOwner,
@@ -854,9 +854,16 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 
 	// delay if write was fast
 	elapsed := time.Since(start)
-	if elapsed.Seconds() < 0.5 {
-		Debug(fmt.Sprintf("Execution time was %v. Waiting for 500 miliseconds to avoid rate limiting.", elapsed.Seconds()))
-		time.Sleep(500 * time.Millisecond)
+	if elapsed.Seconds() < 1 {
+		wait := 1000 - elapsed.Milliseconds()
+		Debug(
+			fmt.Sprintf(
+				"Execution time was %v. Waiting for %vms to avoid rate limiting.",
+				elapsed.Seconds(),
+				wait,
+			),
+		)
+		time.Sleep(time.Duration(wait) * time.Millisecond)
 	}
 
 	// close out this thread
@@ -965,7 +972,6 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 		if err != nil {
 			return err
 		}
-		Debug("Submitting payload")
 
 		// start timer
 		start := time.Now()
@@ -973,10 +979,10 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 		// perform request
 		DebugAndStatus(
 			fmt.Sprintf(
-				"Patching %s/%s with JSON: %s",
+				"Patching %s/%s with visibility '%s'",
 				targetOrg,
 				repository.NameWithOwner,
-				requestbody,
+				strings.ToLower(repository.Visibility),
 			),
 		)
 		err = client.Patch(
@@ -996,8 +1002,15 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 		// delay if write was fast
 		elapsed := time.Since(start)
 		if elapsed.Seconds() < 1 {
-			Debug(fmt.Sprintf("Execution time was %v. Waiting for 1 second to avoid rate limiting.", elapsed.Seconds()))
-			time.Sleep(1 * time.Second)
+			wait := 1000 - elapsed.Milliseconds()
+			Debug(
+				fmt.Sprintf(
+					"Execution time was %v. Waiting for %vms to avoid rate limiting.",
+					elapsed.Seconds(),
+					wait,
+				),
+			)
+			time.Sleep(time.Duration(wait) * time.Millisecond)
 		}
 	}
 
