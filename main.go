@@ -32,7 +32,6 @@ var (
 	ApiUrl          string
 	GithubSourcePat string
 	GithubTargetPat string
-	NoSslVerify     = false
 	Description     = fmt.Sprint(
 		"Post-Migration Audit (PMA) Extension For GitHub CLI. Used to compare ",
 		"GitHub Enterprise (Server or Cloud) to GitHub Enterprise Cloud (includes ",
@@ -433,10 +432,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	if IsTargetProvided() {
 		OutputFlags("GitHub Target Org", GithubTargetOrg)
 	}
-	if NoSslVerify {
-		OutputFlags("SSL Verification Disabled", strconv.FormatBool(NoSslVerify))
-	}
-	OutputFlags("Threads", fmt.Sprintf("%d", Threads))
+	OutputFlags("Read Threads", fmt.Sprintf("%d", Threads))
 	LF()
 	Debug("---- LISTING REPOSITORIES ----")
 
