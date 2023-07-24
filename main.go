@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -22,6 +26,7 @@ import (
 
 var (
 	// flag vars
+	AutoConfirm     = false
 	GithubSourceOrg string
 	GithubTargetOrg string
 	ApiUrl          string
@@ -35,20 +40,18 @@ var (
 	)
 
 	// tool vars
-	DefaultApiUrl    string = "github.com"
-	SourceRestClient api.RESTClient
-	TargetRestClient api.RESTClient
-	GraphqlClient    api.GQLClient
-	RepositoryQuery  struct {
-		Organization struct {
-			Repositories repositoriesPage `graphql:"repositories(first: 100, after: $page, orderBy: {field: NAME, direction: ASC})"`
-		} `graphql:"organization(login: $owner)"`
-	}
-	Repositories []repository = []repository{}
-	LogFile      *os.File
-	Threads      int
-	ResultsTable pterm.TableData
-	WaitGroup    sync.WaitGroup
+	DefaultApiUrl         string = "github.com"
+	SourceRestClient      api.RESTClient
+	TargetRestClient      api.RESTClient
+	SourceGraphqlClient   api.GQLClient
+	TargetGraphqlClient   api.GQLClient
+	SourceRepositories    []repository = []repository{}
+	TargetRepositories    []repository = []repository{}
+	ToProcessRepositories []repository = []repository{}
+	LogFile               *os.File
+	Threads               int
+	ResultsTable          pterm.TableData
+	WaitGroup             sync.WaitGroup
 
 	// Create some colors and a spinner
 	Red     = color.New(color.FgRed).SprintFunc()
@@ -62,13 +65,18 @@ var (
 		Use:           "gh pma",
 		Short:         Description,
 		Long:          Description,
-		Version:       "0.0.3",
+		Version:       "0.0.4",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          Process,
 	}
 )
 
+type repositoryQuery struct {
+	Organization struct {
+		Repositories repositoriesPage `graphql:"repositories(first: 100, after: $page, orderBy: {field: NAME, direction: ASC})"`
+	} `graphql:"organization(login: $owner)"`
+}
 type rateResponse struct {
 	Limit     int
 	Remaining int
@@ -99,15 +107,20 @@ type repositoriesPage struct {
 type repositoryNode struct {
 	Name          string
 	NameWithOwner string
+	Visibility    string
 	Owner         organization
 	Description   string
 	URL           string
 }
 type repository struct {
-	NameWithOwner string
-	Secrets       int
-	Variables     int
-	Environments  int
+	Name             string
+	NameWithOwner    string
+	Visibility       string
+	TargetVisibility string
+	ExistsInTarget   bool
+	Secrets          int
+	Variables        int
+	Environments     int
 }
 type organization struct {
 	Login string
@@ -176,10 +189,16 @@ func init() {
 			"Increasing this number could get your PAT blocked due to API limiting.",
 		),
 	)
+	rootCmd.PersistentFlags().BoolVar(
+		&AutoConfirm,
+		"confirm",
+		false,
+		"Auto respond to confirmation prompt",
+	)
 
 	// make certain flags required
 	rootCmd.MarkPersistentFlagRequired("github-source-org")
-	//rootCmd.MarkPersistentFlagRequired("github-target-org")
+	rootCmd.MarkPersistentFlagRequired("github-target-org")
 
 	// add args here
 	rootCmd.Args = cobra.MaximumNArgs(0)
@@ -243,6 +262,26 @@ func Output(message string, color string, isErr bool, exit bool) {
 	}
 }
 
+func AskForConfirmation(s string) (res bool, err error) {
+	// read the input
+	reader := bufio.NewReader(os.Stdin)
+	// loop until a response is valid
+	for {
+		fmt.Printf("%s [y/n]: ", s)
+		response, err := reader.ReadString('\n')
+		Debug(fmt.Sprint("User responded with: ", response))
+		if err != nil {
+			return false, err
+		}
+		response = strings.ToLower(strings.TrimSpace(response))
+		if response == "y" || response == "yes" {
+			return true, err
+		} else if response == "n" || response == "no" {
+			return false, err
+		}
+	}
+}
+
 func DebugAndStatus(message string) string {
 	Spinner.Suffix = fmt.Sprint(
 		" ",
@@ -254,6 +293,13 @@ func DebugAndStatus(message string) string {
 func Debug(message string) string {
 	Log(message)
 	return message
+}
+
+func IsTargetProvided() bool {
+	if GithubTargetOrg != "" {
+		return true
+	}
+	return false
 }
 
 func GetOpts(hostname, token string) (options api.ClientOptions) {
@@ -287,14 +333,6 @@ func Log(message string) {
 	}
 }
 
-func LF() {
-	Output("", "default", false, false)
-}
-
-func LogLF() {
-	Log("")
-}
-
 func Truncate(str string, limit int) string {
 	lastSpaceIx := -1
 	len := 0
@@ -323,7 +361,6 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	}
 	defer LogFile.Close()
 
-	LF()
 	Debug("---- VALIDATING FLAGS & ENV VARS ----")
 
 	if GithubSourcePat == "" {
@@ -383,14 +420,13 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	if ApiUrl != DefaultApiUrl {
 		OutputFlags("GHES Source URL", ApiUrl)
 	}
-	if GithubTargetOrg != "" {
+	if IsTargetProvided() {
 		OutputFlags("GitHub Target Org", GithubTargetOrg)
 	}
 	if NoSslVerify {
 		OutputFlags("SSL Verification Disabled", strconv.FormatBool(NoSslVerify))
 	}
 	OutputFlags("Threads", fmt.Sprintf("%d", Threads))
-
 	Debug("---- LISTING REPOSITORIES ----")
 
 	// set up clients
@@ -401,10 +437,10 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		OutputError("Failed to set up source REST client.", true)
 	}
 
-	GraphqlClient, err := gh.GQLClient(&opts)
+	SourceGraphqlClient, err = gh.GQLClient(&opts)
 	if err != nil {
 		Debug(fmt.Sprint("Error object: ", err))
-		OutputError("Failed set set up GraphQL client.", true)
+		OutputError("Failed set set up source GraphQL client.", true)
 	}
 
 	opts = GetOpts(DefaultApiUrl, GithubTargetPat)
@@ -413,58 +449,39 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		Debug(fmt.Sprint("Error object: ", err))
 		OutputError("Failed to set up target REST client.", true)
 	}
-	LF()
+
+	TargetGraphqlClient, err = gh.GQLClient(&opts)
+	if err != nil {
+		Debug(fmt.Sprint("Error object: ", err))
+		OutputError("Failed set set up target GraphQL client.", true)
+	}
 
 	Spinner.Start()
 
-	// get our variables set up for the graphql query
-	variables := map[string]interface{}{
-		"owner": graphql.String(GithubSourceOrg),
-		"page":  (*graphql.String)(nil),
+	// determine how many concurrent lookups can take place
+	lookGroups := 1
+	if IsTargetProvided() {
+		lookGroups = 2
+	}
+	WaitGroup.Add(lookGroups)
+
+	// get source (and possible target) repositories
+	go GetSourceRepositories()
+	if err != nil {
+		Debug(fmt.Sprint("Error object: ", err))
+		OutputError("Failed to get source repositories.", true)
 	}
 
-	// Loop through pages of repositories, waiting 1 second in between
-	var i = 1
-	for {
-
-		// validate we have API attempts left
-		timeoutErr := ValidateApiRate(SourceRestClient, "graphql")
-		if timeoutErr != nil {
-			OutputError(timeoutErr.Error(), true)
+	if IsTargetProvided() {
+		go GetTargetRepositories()
+		if err != nil {
+			Debug(fmt.Sprint("Error object: ", err))
+			OutputError("Failed to get target repositories.", true)
 		}
-
-		// show a suffix next to the spinner for what we are curretnly doing
-		DebugAndStatus(
-			fmt.Sprintf(
-				"Fetching repositories from organization '%s' (page %d)",
-				GithubSourceOrg,
-				i,
-			),
-		)
-
-		// make the graphql request
-		GraphqlClient.Query("RepoList", &RepositoryQuery, variables)
-
-		// clone the objects (keeping just the name)
-		for _, repoNode := range RepositoryQuery.Organization.Repositories.Nodes {
-			var repoClone repository
-			repoClone.NameWithOwner = repoNode.NameWithOwner
-			Repositories = append(Repositories, repoClone)
-		}
-
-		Debug(fmt.Sprintf("%v", RepositoryQuery.Organization.Repositories))
-
-		// if no next page is found, break
-		if !RepositoryQuery.Organization.Repositories.PageInfo.HasNextPage {
-			break
-		}
-		i++
-
-		// set the end cursor for the page we are on
-		variables["page"] = &RepositoryQuery.Organization.Repositories.PageInfo.EndCursor
 	}
+	WaitGroup.Wait()
 
-	Debug(fmt.Sprintf("Found %d repositories", len(Repositories)))
+	Debug(fmt.Sprintf("Found %d repositories", len(SourceRepositories)))
 	Debug("---- GETTING REPOSITORY DATA ----")
 
 	// set up table header for displaying of data
@@ -472,6 +489,8 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	ResultsTable = pterm.TableData{
 		{
 			"Repository",
+			"Exists In Target",
+			"Visibility",
 			"Secrets",
 			"Variables",
 			"Environments",
@@ -479,7 +498,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// set a temp var that we can batch through without effecting the original
-	repositoriesToProcess := Repositories
+	repositoriesToProcess := SourceRepositories
 	batchThreads := Threads
 	batchNum := 1
 
@@ -522,7 +541,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 					batch[i].NameWithOwner,
 				),
 			)
-			go GetRepositoryStatistics(batch[i])
+			go GetRepositoryStatistics(SourceRestClient, batch[i])
 		}
 
 		// wait for threads to finish
@@ -533,11 +552,10 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	Spinner.Stop()
 
 	// output table
-	if len(Repositories) > 0 {
+	if len(SourceRepositories) > 0 {
 		pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(ResultsTable).Render()
 	} else {
 		OutputNotice("No repositories found.")
-		LF()
 	}
 
 	// Create output file
@@ -548,27 +566,72 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	defer outputFile.Close()
 
 	// write header
-	_, err = outputFile.WriteString(
-		fmt.Sprintln("repository,secrets,variables,environments"),
-	)
+	_, err = outputFile.WriteString("repository,exists_in_target,visibility,secrets,variables,environments\n")
 	if err != nil {
 		OutputError("Error writing to output file.", true)
 	}
 	// write body
-	for _, repository := range Repositories {
-		_, err = outputFile.WriteString(
-			fmt.Sprintln(
-				fmt.Sprintf(
-					"%s,%d,%d,%d",
-					repository.NameWithOwner,
-					repository.Secrets,
-					repository.Variables,
-					repository.Environments,
-				),
-			),
+	for _, repository := range SourceRepositories {
+		line := fmt.Sprintf("%s", repository.NameWithOwner)
+		if !IsTargetProvided() {
+			line = fmt.Sprintf("%s%s", line, "Unknown")
+		} else {
+			line = fmt.Sprintf("%s%t", line, repository.ExistsInTarget)
+		}
+		line = fmt.Sprintf(
+			"%s,%s|%s,%d,%d,%d\n",
+			line,
+			repository.Visibility,
+			repository.TargetVisibility,
+			repository.Secrets,
+			repository.Variables,
+			repository.Environments,
 		)
+		_, err = outputFile.WriteString(line)
 		if err != nil {
 			OutputError("Error writing to output file.", true)
+		}
+	}
+
+	// prompt for fixing
+	if len(ToProcessRepositories) > 0 {
+		proceedMessage := Debug(fmt.Sprintf(
+			"Do you want to align repository visibilities for %d repositories?",
+			len(ToProcessRepositories),
+		))
+
+		// auto confirm
+		c := true
+		if !AutoConfirm {
+			c, err = AskForConfirmation(Yellow(proceedMessage))
+		}
+
+		// fail if something goes wrong
+		if err != nil {
+			OutputError(err.Error(), true)
+		} else if !c {
+			// warn when manually abandoned
+			OutputWarning("Alignment process abandoned.")
+			return err
+		}
+
+		// process if code gets to here
+		Spinner.Start()
+		err = ProcessRepositoryVisibilities(
+			TargetRestClient,
+			GithubTargetOrg,
+			ToProcessRepositories,
+		)
+		Spinner.Stop()
+
+		// on successful processing
+		if err == nil {
+			OutputNotice(
+				fmt.Sprintf(
+					"Successfully processed %d repositories.",
+					len(ToProcessRepositories),
+				),
+			)
 		}
 	}
 
@@ -639,12 +702,10 @@ func ValidateApiRate(client api.RESTClient, requestType string) (err error) {
 	return err
 }
 
-func GetRepositoryStatistics(repoToProcess repository) {
-
-	Debug("is this working?")
+func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 
 	// validate we have API attempts left
-	timeoutErr := ValidateApiRate(SourceRestClient, "core")
+	timeoutErr := ValidateApiRate(client, "core")
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
@@ -652,7 +713,7 @@ func GetRepositoryStatistics(repoToProcess repository) {
 	// get number of secrets
 	secretCount := 0
 	var secretsResponse secrets
-	secretsErr := SourceRestClient.Get(
+	secretsErr := client.Get(
 		fmt.Sprintf(
 			"repos/%s/actions/secrets",
 			repoToProcess.NameWithOwner,
@@ -672,7 +733,7 @@ func GetRepositoryStatistics(repoToProcess repository) {
 	}
 
 	// validate we have API attempts left
-	timeoutErr = ValidateApiRate(SourceRestClient, "core")
+	timeoutErr = ValidateApiRate(client, "core")
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
@@ -680,7 +741,7 @@ func GetRepositoryStatistics(repoToProcess repository) {
 	// get number of variables
 	variableCount := 0
 	var variablesResponse variables
-	variablesErr := SourceRestClient.Get(
+	variablesErr := client.Get(
 		fmt.Sprintf(
 			"repos/%s/actions/variables",
 			repoToProcess.NameWithOwner,
@@ -700,7 +761,7 @@ func GetRepositoryStatistics(repoToProcess repository) {
 	}
 
 	// validate we have API attempts left
-	timeoutErr = ValidateApiRate(SourceRestClient, "core")
+	timeoutErr = ValidateApiRate(client, "core")
 	if timeoutErr != nil {
 		OutputError(timeoutErr.Error(), true)
 	}
@@ -708,7 +769,7 @@ func GetRepositoryStatistics(repoToProcess repository) {
 	// get number of variables
 	envCount := 0
 	var envResponse environments
-	envsErr := SourceRestClient.Get(
+	envsErr := client.Get(
 		fmt.Sprintf(
 			"repos/%s/environments",
 			repoToProcess.NameWithOwner,
@@ -727,16 +788,25 @@ func GetRepositoryStatistics(repoToProcess repository) {
 		repoToProcess.Environments = envCount
 	}
 
-	// write to table for output
-	ResultsTable = append(ResultsTable, []string{
-		repoToProcess.NameWithOwner,
-		fmt.Sprintf("%d", secretCount),
-		fmt.Sprintf("%d", variableCount),
-		fmt.Sprintf("%d", envCount),
+	// find if repo exists in target
+	targetIdx := slices.IndexFunc(TargetRepositories, func(r repository) bool {
+		return r.Name == repoToProcess.Name
 	})
+	if targetIdx < 0 {
+		repoToProcess.ExistsInTarget = false
+		repoToProcess.TargetVisibility = fmt.Sprintf("UNKNOWN")
+	} else {
+		repoToProcess.ExistsInTarget = true
+		repoToProcess.TargetVisibility = TargetRepositories[targetIdx].Visibility
+
+		// add this repo to array of processing if visibilties don't match
+		if repoToProcess.Visibility != TargetRepositories[targetIdx].Visibility {
+			ToProcessRepositories = append(ToProcessRepositories, repoToProcess)
+		}
+	}
 
 	// find index of repo in original list and overwite it
-	idx := slices.IndexFunc(Repositories, func(r repository) bool {
+	idx := slices.IndexFunc(SourceRepositories, func(r repository) bool {
 		return r.NameWithOwner == repoToProcess.NameWithOwner
 	})
 	if idx < 0 {
@@ -748,12 +818,168 @@ func GetRepositoryStatistics(repoToProcess repository) {
 			false,
 		)
 	} else {
-		Repositories[idx] = repoToProcess
+		SourceRepositories[idx] = repoToProcess
 	}
+
+	// write to table for output
+	visiblity := fmt.Sprintf(
+		"%s|%s",
+		repoToProcess.Visibility,
+		repoToProcess.TargetVisibility,
+	)
+	existsInTarget := strconv.FormatBool(repoToProcess.ExistsInTarget)
+	if !repoToProcess.ExistsInTarget {
+		existsInTarget = Red(existsInTarget)
+	} else if repoToProcess.Visibility != TargetRepositories[targetIdx].Visibility {
+		visiblity = Yellow(visiblity)
+	}
+	ResultsTable = append(ResultsTable, []string{
+		repoToProcess.NameWithOwner,
+		existsInTarget,
+		visiblity,
+		fmt.Sprintf("%d", secretCount),
+		fmt.Sprintf("%d", variableCount),
+		fmt.Sprintf("%d", envCount),
+	})
 
 	// sleep for a second to avoid rate limiting
 	time.Sleep(time.Duration(1))
 
 	// close out this thread
 	WaitGroup.Done()
+}
+
+func GetSourceRepositories() {
+	repositoryQueryResults, err := GetRepositories(
+		SourceRestClient,
+		SourceGraphqlClient,
+		GithubSourceOrg,
+	)
+	if err != nil {
+		ExitManual(err)
+	}
+	SourceRepositories = repositoryQueryResults
+	WaitGroup.Done()
+}
+
+func GetTargetRepositories() {
+	repositoryQueryResults, err := GetRepositories(
+		TargetRestClient,
+		TargetGraphqlClient,
+		GithubTargetOrg,
+	)
+	if err != nil {
+		ExitManual(err)
+	}
+	TargetRepositories = repositoryQueryResults
+	WaitGroup.Done()
+}
+
+func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, owner string) ([]repository, error) {
+
+	repoLookup := []repository{}
+	query := repositoryQuery{}
+	var err error
+
+	// get our variables set up for the graphql query
+	variables := map[string]interface{}{
+		"owner": graphql.String(owner),
+		"page":  (*graphql.String)(nil),
+	}
+
+	// Loop through pages of repositories, waiting 1 second in between
+	var i = 1
+	for {
+
+		// validate we have API attempts left
+		err := ValidateApiRate(restClient, "graphql")
+		if err != nil {
+			OutputError(err.Error(), true)
+		}
+
+		// show a suffix next to the spinner for what we are curretnly doing
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Fetching repositories from organization '%s' (page %d)",
+				owner,
+				i,
+			),
+		)
+
+		// make the graphql request
+		graphqlClient.Query("RepoList", &query, variables)
+
+		// clone the objects (keeping just the name)
+		for _, repoNode := range query.Organization.Repositories.Nodes {
+			var repoClone repository
+			repoClone.Name = repoNode.Name
+			repoClone.NameWithOwner = repoNode.NameWithOwner
+			repoClone.Visibility = repoNode.Visibility
+			repoLookup = append(repoLookup, repoClone)
+		}
+
+		Debug(fmt.Sprintf("%v", query.Organization.Repositories))
+
+		// if no next page is found, break
+		if !query.Organization.Repositories.PageInfo.HasNextPage {
+			break
+		}
+		i++
+
+		// set the end cursor for the page we are on
+		variables["page"] = query.Organization.Repositories.PageInfo.EndCursor
+	}
+
+	return repoLookup, err
+}
+
+func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, reposToProcess []repository) (err error) {
+
+	var response interface{}
+	for _, repository := range reposToProcess {
+
+		// create json body
+		requestbody, err := json.Marshal(map[string]string{
+			"visibility": strings.ToLower(repository.Visibility),
+		})
+		if err != nil {
+			return err
+		}
+		Debug("Submitting payload")
+
+		// start timer
+		start := time.Now()
+
+		// perform request
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Patching %s/%s with JSON: %s",
+				targetOrg,
+				repository.NameWithOwner,
+				requestbody,
+			),
+		)
+		err = client.Patch(
+			fmt.Sprintf(
+				"repos/%s/%s",
+				targetOrg,
+				repository.Name,
+			),
+			bytes.NewBuffer(requestbody),
+			&response,
+		)
+		Debug(fmt.Sprintf("Response from PATCH: %v", response))
+		if err != nil {
+			return err
+		}
+
+		// delay if write was fast
+		elapsed := time.Since(start)
+		if elapsed < 1 {
+			time.Sleep(1)
+		}
+	}
+
+	// always return
+	return err
 }
