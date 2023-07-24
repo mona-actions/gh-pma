@@ -7,16 +7,20 @@ Post-Migration Audit (PMA) Extension For GitHub CLI. Used to compare GitHub Ente
 ## Under Construction
 This is a work-in-progress. Currently the tool will report:
 
-- Repositories migrated and if any of the following need to be manually copied:
+- If the repository exists in the target org
+- Visibility of repository in target org
+- Counts of the following in the source org
   - Secrets
   - Variables
   - Environments
+
+Additionally, you will be prompted to PATCH visibilities if they do not match from source to target.
 
 ## Prerequisites
 - [GitHub CLI](https://cli.github.com/manual/installation) installed.
 
 ## Permissions Required
-Put link to migration permissions here
+You will only be able to see repos your account has access too, so make sure your PATs for the source and destination are correct. Additionally, you will need to have full repo permissions if you want to PATCH the visibility from source to target.
 
 ## Install
 
@@ -42,6 +46,7 @@ Usage:
   gh pma [flags]
 
 Flags:
+      --confirm                    Auto respond to confirmation prompt
       --ghes-api-url string        Required if migrating from GHES. The domain name for your GHES instance. For example: ghes.contoso.com (default "github.com")
       --github-source-org string   Uses GH_SOURCE_PAT env variable or --github-source-pat option. Will fall back to GH_PAT or --github-target-pat if not set.
       --github-source-pat string   
