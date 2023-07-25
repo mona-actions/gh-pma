@@ -128,6 +128,7 @@ type repositoryNode struct {
 }
 type repository struct {
 	Name             string
+	Owner            string
 	NameWithOwner    string
 	Visibility       string
 	TargetVisibility string
@@ -1002,6 +1003,7 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 		for _, repoNode := range query.Organization.Repositories.Nodes {
 			var repoClone repository
 			repoClone.Name = repoNode.Name
+			repoClone.Owner = repoNode.Owner.Login
 			repoClone.NameWithOwner = repoNode.NameWithOwner
 			repoClone.Visibility = repoNode.Visibility
 			repoLookup = append(repoLookup, repoClone)
@@ -1084,15 +1086,18 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 
 		// create a template for the issue
 		issueTemplate := "# Audit Results\n"
+		now := time.Now()
+		tz, _ := now.Zone()
 		issueTemplate += fmt.Sprintf(
-			"Audit last performed on %s at %s.\n\n",
-			time.Now().Format("2006-01-02"),
-			time.Now().Format("15:04:05"),
+			"Audit last performed on %s at %s %s.\n\n",
+			now.Format("2006-01-02"),
+			now.Format("15:04:05"),
+			tz,
 		)
 		issueTemplate += "See below for migration details and whether "
 		issueTemplate += "you need to mitigate any items.\n\n"
 		issueTemplate += "## Details\n"
-		issueTemplate += "- **Migrated From:** %s\n"
+		issueTemplate += "- **Migrated From:** [%s](https://github.com/%s)\n"
 		issueTemplate += "- **Source Visibility:** %s\n\n"
 		issueTemplate += "## Items From Source\n"
 		issueTemplate += "- Variables: `%+v`\n"
@@ -1100,7 +1105,8 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 		issueTemplate += "- Environments: `%+v`\n"
 		issueBody := fmt.Sprintf(
 			issueTemplate,
-			targetOrg,
+			repository.Owner,
+			repository.Owner,
 			repository.Visibility,
 			repository.Variables,
 			repository.Secrets,
