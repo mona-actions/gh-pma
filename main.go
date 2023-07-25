@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 var (
 	// flag vars
 	AutoConfirm     = false
+	CreateIssues    = false
 	GithubSourceOrg string
 	GithubTargetOrg string
 	ApiUrl          string
@@ -39,18 +41,19 @@ var (
 	)
 
 	// tool vars
-	DefaultApiUrl         string = "github.com"
-	SourceRestClient      api.RESTClient
-	TargetRestClient      api.RESTClient
-	SourceGraphqlClient   api.GQLClient
-	TargetGraphqlClient   api.GQLClient
-	SourceRepositories    []repository = []repository{}
-	TargetRepositories    []repository = []repository{}
-	ToProcessRepositories []repository = []repository{}
-	LogFile               *os.File
-	Threads               int
-	ResultsTable          pterm.TableData
-	WaitGroup             sync.WaitGroup
+	DefaultApiUrl             string = "github.com"
+	DefaultIssueTitleTemplate string = "Post Migration Assessment"
+	SourceRestClient          api.RESTClient
+	TargetRestClient          api.RESTClient
+	SourceGraphqlClient       api.GQLClient
+	TargetGraphqlClient       api.GQLClient
+	SourceRepositories        []repository = []repository{}
+	TargetRepositories        []repository = []repository{}
+	ToProcessRepositories     []repository = []repository{}
+	LogFile                   *os.File
+	Threads                   int
+	ResultsTable              pterm.TableData
+	WaitGroup                 sync.WaitGroup
 
 	// Create some colors and a spinner
 	Red     = color.New(color.FgRed).SprintFunc()
@@ -92,6 +95,7 @@ type apiResponse struct {
 }
 type environments struct {
 	Environments []environment
+	Total_Count  int
 }
 type environment struct {
 	Name string
@@ -117,24 +121,27 @@ type repository struct {
 	Visibility       string
 	TargetVisibility string
 	ExistsInTarget   bool
-	Secrets          int
-	Variables        int
-	Environments     int
+	Secrets          secrets
+	Variables        variables
+	Environments     environments
 }
 type organization struct {
 	Login string
 }
 type secrets struct {
-	Secrets []secret
+	Secrets     []secret
+	Total_Count int
 }
 type secret struct {
 	Name string
 }
 type variables struct {
-	Variables []secret
+	Variables   []secret
+	Total_Count int
 }
 type variable struct {
-	Name string
+	Name  string
+	Value string
 }
 type user struct {
 	Login string
@@ -192,7 +199,14 @@ func init() {
 		&AutoConfirm,
 		"confirm",
 		false,
-		"Auto respond to confirmation prompt",
+		"Auto respond to visibility alignment confirmation prompt",
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&CreateIssues,
+		"create-issues",
+		"c",
+		false,
+		"Whether to create issues in target org repositories or not.",
 	)
 
 	// make certain flags required
@@ -440,7 +454,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	}
 	OutputFlags("Read Threads", fmt.Sprintf("%d", Threads))
 	LF()
-	Debug("---- LISTING REPOSITORIES ----")
+	Debug("---- SETTING UP API CLIENTS ----")
 
 	// set up clients
 	opts := GetOpts(ApiUrl, GithubSourcePat)
@@ -469,28 +483,21 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		OutputError("Failed set set up target GraphQL client.", true)
 	}
 
+	Debug("---- LOOKING UP REPOSITORIES IN ORGS ----")
+
 	Spinner.Start()
 
-	// determine how many concurrent lookups can take place
-	lookGroups := 1
-	if IsTargetProvided() {
-		lookGroups = 2
-	}
-	WaitGroup.Add(lookGroups)
-
-	// get source (and possible target) repositories
+	// thread getting repos
+	WaitGroup.Add(2)
 	go GetSourceRepositories()
 	if err != nil {
 		Debug(fmt.Sprint("Error object: ", err))
 		OutputError("Failed to get source repositories.", true)
 	}
-
-	if IsTargetProvided() {
-		go GetTargetRepositories()
-		if err != nil {
-			Debug(fmt.Sprint("Error object: ", err))
-			OutputError("Failed to get target repositories.", true)
-		}
+	go GetTargetRepositories()
+	if err != nil {
+		Debug(fmt.Sprint("Error object: ", err))
+		OutputError("Failed to get target repositories.", true)
 	}
 	WaitGroup.Wait()
 
@@ -607,11 +614,27 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
+	// create issues if we need to
+	if CreateIssues {
+		DebugAndStatus("Attempting to create issues for repositories...")
+		err = ProcessIssues(SourceRestClient, GithubTargetOrg, SourceRepositories)
+		if err != nil {
+			return err
+		}
+	}
+
 	// prompt for fixing
 	if len(ToProcessRepositories) > 0 {
+
+		// find out if we need to process visibility
+		repoWord := "repository"
+		if len(ToProcessRepositories) > 1 {
+			repoWord = "repositories"
+		}
 		proceedMessage := Debug(fmt.Sprintf(
-			"Do you want to align repository visibilities for %d repositories?",
+			"Do you want to align visibility for %d %s?",
 			len(ToProcessRepositories),
+			repoWord,
 		))
 
 		// auto confirm
@@ -619,13 +642,13 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		if !AutoConfirm {
 			c, err = AskForConfirmation(Yellow(proceedMessage))
 		}
-
-		// fail if something goes wrong
 		if err != nil {
 			OutputError(err.Error(), true)
 		} else if !c {
 			// warn when manually abandoned
+			LF()
 			OutputWarning("Alignment process abandoned.")
+			LF()
 			return err
 		}
 
@@ -734,7 +757,6 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	start := time.Now()
 
 	// get number of secrets
-	secretCount := 0
 	var secretsResponse secrets
 	secretsErr := client.Get(
 		fmt.Sprintf(
@@ -751,8 +773,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	if secretsErr != nil {
 		ExitManual(secretsErr)
 	} else {
-		secretCount = len(secretsResponse.Secrets)
-		repoToProcess.Secrets = secretCount
+		repoToProcess.Secrets = secretsResponse
 	}
 
 	// validate we have API attempts left
@@ -763,7 +784,6 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	}
 
 	// get number of variables
-	variableCount := 0
 	var variablesResponse variables
 	variablesErr := client.Get(
 		fmt.Sprintf(
@@ -780,8 +800,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	if variablesErr != nil {
 		ExitManual(variablesErr)
 	} else {
-		variableCount = len(variablesResponse.Variables)
-		repoToProcess.Variables = variableCount
+		repoToProcess.Variables = variablesResponse
 	}
 
 	// validate we have API attempts left
@@ -791,7 +810,6 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	}
 
 	// get number of variables
-	envCount := 0
 	var envResponse environments
 	envsErr := client.Get(
 		fmt.Sprintf(
@@ -808,8 +826,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	if envsErr != nil {
 		ExitManual(envsErr)
 	} else {
-		envCount = len(envResponse.Environments)
-		repoToProcess.Environments = envCount
+		repoToProcess.Environments = envResponse
 	}
 
 	// find if repo exists in target
@@ -847,23 +864,26 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 
 	// write to table for output
 	visiblity := fmt.Sprintf(
-		"%s|%s",
+		"%s",
 		repoToProcess.Visibility,
-		repoToProcess.TargetVisibility,
 	)
 	existsInTarget := strconv.FormatBool(repoToProcess.ExistsInTarget)
 	if !repoToProcess.ExistsInTarget {
 		existsInTarget = Red(existsInTarget)
 	} else if repoToProcess.Visibility != TargetRepositories[targetIdx].Visibility {
-		visiblity = Yellow(visiblity)
+		visiblity = fmt.Sprintf(
+			"%s|%s",
+			visiblity,
+			Yellow(repoToProcess.TargetVisibility),
+		)
 	}
 	ResultsTable = append(ResultsTable, []string{
 		repoToProcess.NameWithOwner,
 		existsInTarget,
-		visiblity,
-		fmt.Sprintf("%d", secretCount),
-		fmt.Sprintf("%d", variableCount),
-		fmt.Sprintf("%d", envCount),
+		strings.ToLower(visiblity),
+		fmt.Sprintf("%d", secretsResponse.Total_Count),
+		fmt.Sprintf("%d", variablesResponse.Total_Count),
+		fmt.Sprintf("%d", envResponse.Total_Count),
 	})
 
 	// delay if write was fast
@@ -966,6 +986,52 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 	}
 
 	return repoLookup, err
+}
+
+func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []repository) (err error) {
+
+	var response interface{}
+	for _, repository := range reposToProcess {
+
+		if !repository.ExistsInTarget {
+			Debug(
+				fmt.Sprintf(
+					"Skipped %s because it did not exist in the target org.",
+					repository.Name,
+				),
+			)
+			continue
+		}
+
+		// validate rate
+		_, err := ValidateApiRate(client, "core")
+		if err != nil {
+			return err
+		}
+
+		query := url.QueryEscape(
+			fmt.Sprintf(
+				"%s repo:%s/%s in:title",
+				DefaultIssueTitleTemplate,
+				targetOrg,
+				repository.Name,
+			),
+		)
+		Debug(fmt.Sprintf("Using search string: %s", query))
+		err = client.Get(
+			fmt.Sprintf(
+				"search/issues?q=%s",
+				query,
+			),
+			&response,
+		)
+		Debug(fmt.Sprintf("Response from GET: %v", response))
+		if err != nil {
+			return err
+		}
+	}
+
+	return err
 }
 
 func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, reposToProcess []repository) (err error) {
