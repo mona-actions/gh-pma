@@ -9,6 +9,8 @@ Will report on:
    - Variables
    - Environments
 
+Optionally you can choose to create a CSV in your file system (`-c` flag) and/or an issue (`-i` flag) in the target repo with the results.
+
 The tool could be expanded to include other non-migratable settings (see [what is & isn't migrated](https://docs.github.com/en/migrations/using-github-enterprise-importer/understanding-github-enterprise-importer/migration-support-for-github-enterprise-importer#githubcom-migration-support) during a migration with [GEI](https://github.com/github/gh-gei)), and most likely will in the near future.
 
 [![build](https://github.com/mona-actions/gh-pma/actions/workflows/build.yaml/badge.svg)](https://github.com/mona-actions/gh-pma/actions/workflows/build.yaml)
@@ -19,7 +21,6 @@ The tool could be expanded to include other non-migratable settings (see [what i
    - Codespaces Secrets
    - Dependabot Secrets
    - Environmen Secrets & Vars (currently just Environments are detected)
-- Create an issue on the target org repository with the list of items to mitigate.
 
 ## Prerequisites
 - [GitHub CLI](https://cli.github.com/manual/installation) installed.
