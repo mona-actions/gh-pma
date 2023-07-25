@@ -21,6 +21,7 @@ The tool could be expanded to include other non-migratable settings (see [what i
    - Codespaces Secrets
    - Dependabot Secrets
    - Environment Secrets & Vars (currently just Environments are detected)
+- GitHub App for authentication
 
 ## Prerequisites
 - [GitHub CLI](https://cli.github.com/manual/installation) installed.
