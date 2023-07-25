@@ -28,15 +28,15 @@ import (
 
 var (
 	// flag vars
-	AutoConfirm     = false
-	CreateIssues    = false
-	CreateCSV       = false
-	GithubSourceOrg string
-	GithubTargetOrg string
-	ApiUrl          string
-	GithubSourcePat string
-	GithubTargetPat string
-	Description     = fmt.Sprint(
+	AutoConfirm      = false
+	CreateIssues     = false
+	CreateCSV        = false
+	GithubSourceOrg  string
+	GithubTargetOrg  string
+	ApiUrl           string
+	GithubSourcePat  string
+	GithubTargetPat  string
+	DefaultBranchRef = fmt.Sprint(
 		"Post-Migration Audit (PMA) Extension For GitHub CLI. Used to compare ",
 		"GitHub Enterprise (Server or Cloud) to GitHub Enterprise Cloud (includes ",
 		"Managed Users) migrations.",
@@ -67,8 +67,8 @@ var (
 	// Create the root cobra command
 	rootCmd = &cobra.Command{
 		Use:           "gh pma",
-		Short:         Description,
-		Long:          Description,
+		Short:         DefaultBranchRef,
+		Long:          DefaultBranchRef,
 		Version:       "0.0.8",
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -122,18 +122,22 @@ type repositoriesPage struct {
 	}
 	Nodes []repositoryNode
 }
+
+type branchRef struct {
+	Name string
+}
 type repositoryNode struct {
-	Name          string
-	NameWithOwner string
-	Visibility    string
-	Owner         organization
-	Description   string
-	URL           string
+	Name             string
+	NameWithOwner    string
+	Visibility       string
+	Owner            owner
+	DefaultBranchRef branchRef
 }
 type repository struct {
 	Name             string
 	Owner            string
 	NameWithOwner    string
+	DefaultBranchRef branchRef
 	Visibility       string
 	TargetVisibility string
 	ExistsInTarget   bool
@@ -142,7 +146,7 @@ type repository struct {
 	Environments     environments
 	LFS              file
 }
-type organization struct {
+type owner struct {
 	Login string
 }
 type secrets struct {
@@ -557,6 +561,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		{
 			"Repository",
 			"Exists In Target",
+			"Default Branch",
 			"Visibility",
 			"Secrets",
 			"Variables",
@@ -636,7 +641,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 		// write header
 		_, err = outputFile.WriteString(
-			"repository,exists_in_target,visibility,secrets,variables,environments\n",
+			"repository,exists_in_target,default_branch,visibility,secrets,variables,environments\n",
 		)
 		if err != nil {
 			OutputError("Error writing to output file.", true)
@@ -645,13 +650,14 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		for _, repository := range SourceRepositories {
 			line := fmt.Sprintf("%s", repository.NameWithOwner)
 			if !IsTargetProvided() {
-				line = fmt.Sprintf("%s%s", line, "Unknown")
+				line = fmt.Sprintf("%s,%s", line, "Unknown")
 			} else {
-				line = fmt.Sprintf("%s%t", line, repository.ExistsInTarget)
+				line = fmt.Sprintf("%s,%t", line, repository.ExistsInTarget)
 			}
 			line = fmt.Sprintf(
-				"%s,%s|%s,%d,%d,%d\n",
+				"%s,%s,%s|%s,%d,%d,%d\n",
 				line,
+				repository.DefaultBranchRef.Name,
 				repository.Visibility,
 				repository.TargetVisibility,
 				repository.Secrets.Total_Count,
@@ -818,7 +824,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 		&secretsResponse,
 	)
 	Debug(fmt.Sprintf(
-		"Secrets from %s: %v",
+		"Secrets from %s: %+v",
 		repoToProcess.NameWithOwner,
 		secretsResponse,
 	))
@@ -845,7 +851,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 		&variablesResponse,
 	)
 	Debug(fmt.Sprintf(
-		"Variables from %s: %v",
+		"Variables from %s: %+v",
 		repoToProcess.NameWithOwner,
 		variablesResponse,
 	))
@@ -871,7 +877,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 		&envResponse,
 	)
 	Debug(fmt.Sprintf(
-		"Environments from %s: %v",
+		"Environments from %s: %+v",
 		repoToProcess.NameWithOwner,
 		envResponse,
 	))
@@ -891,7 +897,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 		&fileResponse,
 	)
 	Debug(fmt.Sprintf(
-		"Contents of .gitattributes from %s: %v",
+		"Contents of .gitattributes from %s: %+v",
 		repoToProcess.NameWithOwner,
 		fileResponse,
 	))
@@ -948,6 +954,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	ResultsTable = append(ResultsTable, []string{
 		repoToProcess.NameWithOwner,
 		existsInTarget,
+		repoToProcess.DefaultBranchRef.Name,
 		strings.ToLower(visiblity),
 		fmt.Sprintf("%d", secretsResponse.Total_Count),
 		fmt.Sprintf("%d", variablesResponse.Total_Count),
@@ -1027,10 +1034,16 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 			repoClone.Owner = repoNode.Owner.Login
 			repoClone.NameWithOwner = repoNode.NameWithOwner
 			repoClone.Visibility = repoNode.Visibility
+			repoClone.DefaultBranchRef = repoNode.DefaultBranchRef
 			repoLookup = append(repoLookup, repoClone)
 		}
 
-		Debug(fmt.Sprintf("%v", query.Organization.Repositories))
+		Debug(
+			fmt.Sprintf(
+				"GraphQL Repository Query Response: %+v",
+				query.Organization.Repositories,
+			),
+		)
 
 		// if no next page is found, break
 		if !query.Organization.Repositories.PageInfo.HasNextPage {
@@ -1090,7 +1103,7 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 			),
 			&issuesResponse,
 		)
-		Debug(fmt.Sprintf("Response from GET: %v", issuesResponse))
+		Debug(fmt.Sprintf("Response from GET: %+v", issuesResponse))
 
 		if err != nil {
 			return err
@@ -1125,7 +1138,7 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 		issueTemplate += "- Secrets: `%+v`\n"
 		issueTemplate += "- Environments: `%+v`\n\n"
 		issueTemplate += "## LFS Detection\n"
-		issueTemplate += "Only accounts for HEAD branch.\n\n"
+		issueTemplate += "Only accounts for `%s` branch.\n\n"
 		decodedLFS, _ := base64.StdEncoding.DecodeString(repository.LFS.Content)
 		if strings.Contains(string(decodedLFS), "filter=lfs") {
 			issueTemplate += "Validate the paths referenced in `.gitattributes`:\n"
@@ -1138,11 +1151,12 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 		issueBody := fmt.Sprintf(
 			issueTemplate,
 			repository.Owner,
-			repository.Owner,
+			repository.DefaultBranchRef.Name,
 			repository.Visibility,
 			repository.Variables,
 			repository.Secrets,
 			repository.Environments,
+			repository.DefaultBranchRef,
 		)
 
 		if issuesResponse.Total_Count == 1 {
@@ -1172,7 +1186,7 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 			if err != nil {
 				return err
 			}
-			Debug(fmt.Sprintf("Response from PATCH: %v", updateResponse))
+			Debug(fmt.Sprintf("Response from PATCH: %+v", updateResponse))
 
 		} else if issuesResponse.Total_Count == 0 {
 
@@ -1199,7 +1213,7 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 			if err != nil {
 				return err
 			}
-			Debug(fmt.Sprintf("Response from POST: %v", createResponse))
+			Debug(fmt.Sprintf("Response from POST: %+v", createResponse))
 
 		} else {
 
@@ -1259,7 +1273,7 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 			bytes.NewBuffer(requestbody),
 			&response,
 		)
-		Debug(fmt.Sprintf("Response from PATCH: %v", response))
+		Debug(fmt.Sprintf("Response from PATCH: %+v", response))
 		if err != nil {
 			return err
 		}
