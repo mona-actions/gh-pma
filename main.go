@@ -1040,9 +1040,9 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 
 		Debug(
 			fmt.Sprintf(
-				"GraphQL Repository Query Response: %+v", 
+				"GraphQL Repository Query Response: %+v",
 				query.Organization.Repositories,
-			)
+			),
 		)
 
 		// if no next page is found, break
