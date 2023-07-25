@@ -53,13 +53,15 @@ Usage:
   gh pma [flags]
 
 Flags:
-      --confirm                    Auto respond to confirmation prompt
+      --confirm                    Auto respond to visibility alignment confirmation prompt
+  -c, --create-csv                 Whether to create a CSV file with the results.
+  -i, --create-issues              Whether to create issues in target org repositories or not.
       --ghes-api-url string        Required if migrating from GHES. The domain name for your GHES instance. For example: ghes.contoso.com (default "github.com")
       --github-source-org string   Uses GH_SOURCE_PAT env variable or --github-source-pat option. Will fall back to GH_PAT or --github-target-pat if not set.
       --github-source-pat string   
       --github-target-org string   Uses GH_PAT env variable or --github-target-pat option.
       --github-target-pat string   
   -h, --help                       help for gh
-  -t, --threads int                Number of threads to process concurrently. Maximum of 10 allowed. Increasing this number could get your PAT blocked due to API limiting. (default 3)
+      --threads int                Number of threads to process concurrently. Maximum of 10 allowed. Increasing this number could get your PAT blocked due to API limiting. (default 3)
   -v, --version                    version for gh
 ```

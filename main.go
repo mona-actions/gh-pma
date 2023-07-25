@@ -330,6 +330,14 @@ func Debug(message string) string {
 	return message
 }
 
+func DisplayRateLeft() {
+	// validate we have API attempts left
+	rateLeft, _ := ValidateApiRate(SourceRestClient, "core")
+	rateMessage := Cyan("API Rate Limit Left:")
+	OutputNotice(fmt.Sprintf("%s %d", rateMessage, rateLeft))
+	LF()
+}
+
 func IsTargetProvided() bool {
 	if GithubTargetOrg != "" {
 		return true
@@ -688,6 +696,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 			LF()
 			OutputWarning("Alignment process abandoned.")
 			LF()
+			DisplayRateLeft()
 			return err
 		}
 
@@ -702,20 +711,18 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 		// on successful processing
 		if err == nil {
+			LF()
 			OutputNotice(
 				fmt.Sprintf(
 					"Successfully processed %d repositories.",
 					len(ToProcessRepositories),
 				),
 			)
+			LF()
 		}
 	}
 
-	// validate we have API attempts left
-	rateLeft, _ := ValidateApiRate(SourceRestClient, "core")
-	rateMessage := Cyan("API Rate Limit Left:")
-	OutputNotice(fmt.Sprintf("%s %d", rateMessage, rateLeft))
-	LF()
+	DisplayRateLeft()
 
 	// always return
 	return err
