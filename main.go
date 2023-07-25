@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,7 +69,7 @@ var (
 		Use:           "gh pma",
 		Short:         Description,
 		Long:          Description,
-		Version:       "0.0.7",
+		Version:       "0.0.8",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          Process,
@@ -93,6 +94,9 @@ type apiResponse struct {
 	}
 	Message string
 	Rate    rateResponse
+}
+type file struct {
+	Content string
 }
 type environments struct {
 	Environments []environment
@@ -136,6 +140,7 @@ type repository struct {
 	Secrets          secrets
 	Variables        variables
 	Environments     environments
+	LFS              file
 }
 type organization struct {
 	Login string
@@ -876,6 +881,22 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 		repoToProcess.Environments = envResponse
 	}
 
+	// get LFS definition file
+	var fileResponse file
+	_ = client.Get(
+		fmt.Sprintf(
+			"repos/%s/contents/.gitattributes",
+			repoToProcess.NameWithOwner,
+		),
+		&fileResponse,
+	)
+	Debug(fmt.Sprintf(
+		"Contents of .gitattributes from %s: %v",
+		repoToProcess.NameWithOwner,
+		fileResponse,
+	))
+	repoToProcess.LFS = fileResponse
+
 	// find if repo exists in target
 	targetIdx := slices.IndexFunc(TargetRepositories, func(r repository) bool {
 		return r.Name == repoToProcess.Name
@@ -1102,7 +1123,18 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 		issueTemplate += "## Items From Source\n"
 		issueTemplate += "- Variables: `%+v`\n"
 		issueTemplate += "- Secrets: `%+v`\n"
-		issueTemplate += "- Environments: `%+v`\n"
+		issueTemplate += "- Environments: `%+v`\n\n"
+		issueTemplate += "## LFS Detection\n"
+		issueTemplate += "Only accounts for HEAD branch.\n\n"
+		decodedLFS, _ := base64.StdEncoding.DecodeString(repository.LFS.Content)
+		if strings.Contains(string(decodedLFS), "filter=lfs") {
+			issueTemplate += "Validate the paths referenced in `.gitattributes`:\n"
+			issueTemplate += "```\n"
+			issueTemplate += string(decodedLFS)
+			issueTemplate += "```\n"
+		} else {
+			issueTemplate += "No LFS declaration detected in `.gitattributes`\n"
+		}
 		issueBody := fmt.Sprintf(
 			issueTemplate,
 			repository.Owner,
