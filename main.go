@@ -43,7 +43,7 @@ var (
 
 	// tool vars
 	DefaultApiUrl             string = "github.com"
-	DefaultIssueTitleTemplate string = "Post Migration Assessment"
+	DefaultIssueTitleTemplate string = "Post Migration Audit"
 	SourceRestClient          api.RESTClient
 	TargetRestClient          api.RESTClient
 	SourceGraphqlClient       api.GQLClient
@@ -147,7 +147,7 @@ type secret struct {
 	Name string
 }
 type variables struct {
-	Variables   []secret
+	Variables   []variable
 	Total_Count int
 }
 type variable struct {
@@ -1082,6 +1082,31 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 		// start timer
 		start := time.Now()
 
+		// create a template for the issue
+		issueTemplate := "# Audit Results\n"
+		issueTemplate += fmt.Sprintf(
+			"Audit last performed on %s at %s.\n\n",
+			time.Now().Format("2006-01-02"),
+			time.Now().Format("15:04:05"),
+		)
+		issueTemplate += "See below for migration details and whether "
+		issueTemplate += "you need to mitigate any items.\n\n"
+		issueTemplate += "## Details\n"
+		issueTemplate += "- **Migrated From:** %s\n"
+		issueTemplate += "- **Source Visibility:** %s\n\n"
+		issueTemplate += "## Items From Source\n"
+		issueTemplate += "- Variables: `%+v`\n"
+		issueTemplate += "- Secrets: `%+v`\n"
+		issueTemplate += "- Environments: `%+v`\n"
+		issueBody := fmt.Sprintf(
+			issueTemplate,
+			targetOrg,
+			repository.Visibility,
+			repository.Variables,
+			repository.Secrets,
+			repository.Environments,
+		)
+
 		if issuesResponse.Total_Count == 1 {
 
 			var updateResponse interface{}
@@ -1089,7 +1114,7 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 			foundIssue := issuesResponse.Items[0]
 			// update an issue
 			updateBody, err := json.Marshal(map[string]string{
-				"body": fmt.Sprintf("test: %s", time.Now()),
+				"body": issueBody,
 			})
 			if err != nil {
 				return err
@@ -1117,7 +1142,7 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 			// create an issue
 			createBody, err := json.Marshal(map[string]string{
 				"title": DefaultIssueTitleTemplate,
-				"body":  "first test",
+				"body":  issueBody,
 			})
 			if err != nil {
 				return err
