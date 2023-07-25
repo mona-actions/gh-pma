@@ -11,7 +11,7 @@ Will report on:
 
 Optionally you can choose to create a CSV in your file system (`-c` flag) and/or an issue (`-i` flag) in the target repo with the results.
 
-The tool could be expanded to include other non-migratable settings (see [what is & isn't migrated](https://docs.github.com/en/migrations/using-github-enterprise-importer/understanding-github-enterprise-importer/migration-support-for-github-enterprise-importer#githubcom-migration-support) during a migration with [GEI](https://github.com/github/gh-gei)), and most likely will in the near future.
+The tool could be expanded to include other non-migratable settings (see [what is & isn't migrated](https://docs.github.com/en/migrations/using-github-enterprise-importer/understanding-github-enterprise-importer/migration-support-for-github-enterprise-importer#githubcom-migration-support) during a migration with [GEI](https://github.com/github/gh-gei)).
 
 [![build](https://github.com/mona-actions/gh-pma/actions/workflows/build.yaml/badge.svg)](https://github.com/mona-actions/gh-pma/actions/workflows/build.yaml)
 [![release](https://github.com/mona-actions/gh-pma/actions/workflows/release.yaml/badge.svg)](https://github.com/mona-actions/gh-pma/actions/workflows/release.yaml)
@@ -22,6 +22,9 @@ The tool could be expanded to include other non-migratable settings (see [what i
    - Dependabot Secrets
    - Environment Secrets & Vars (currently just Environments are detected)
 - GitHub App for authentication
+
+## Caveat On LFS Detection
+This currently only checks the default branch for a `.gitattributes` file and validates a line exists with `filter=LFS`. This doesn't mean your repository actually contains LFS objects, it's just a litmus test to detect the possibility. Without the `.gitattributes` file, no LFS files would exist, except in the case that a branch (not the default) is using LFS and has diverged from default in that way.
 
 ## Prerequisites
 - [GitHub CLI](https://cli.github.com/manual/installation) installed.
