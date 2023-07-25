@@ -100,6 +100,16 @@ type environments struct {
 type environment struct {
 	Name string
 }
+type issues struct {
+	Items       []issue
+	Total_Count int
+}
+type issue struct {
+	Title  string
+	ID     int
+	Number int
+	State  string
+}
 type repositoriesPage struct {
 	PageInfo struct {
 		HasNextPage bool
@@ -380,6 +390,22 @@ func StripAnsi(str string) string {
 	return regex.ReplaceAllString(str, "")
 }
 
+func SleepIfLongerThan(thisTime time.Time) {
+	// delay if write was fast
+	elapsed := time.Since(thisTime)
+	if elapsed.Seconds() < 1 {
+		wait := 1000 - elapsed.Milliseconds()
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Execution time was %v. Waiting for %vms to avoid rate limiting.",
+				elapsed.Seconds(),
+				wait,
+			),
+		)
+		time.Sleep(time.Duration(wait) * time.Millisecond)
+	}
+}
+
 func Process(cmd *cobra.Command, args []string) (err error) {
 
 	// Create log file
@@ -587,7 +613,9 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	defer outputFile.Close()
 
 	// write header
-	_, err = outputFile.WriteString("repository,exists_in_target,visibility,secrets,variables,environments\n")
+	_, err = outputFile.WriteString(
+		"repository,exists_in_target,visibility,secrets,variables,environments\n",
+	)
 	if err != nil {
 		OutputError("Error writing to output file.", true)
 	}
@@ -604,9 +632,9 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 			line,
 			repository.Visibility,
 			repository.TargetVisibility,
-			repository.Secrets,
-			repository.Variables,
-			repository.Environments,
+			repository.Secrets.Total_Count,
+			repository.Variables.Total_Count,
+			repository.Environments.Total_Count,
 		)
 		_, err = outputFile.WriteString(line)
 		if err != nil {
@@ -616,8 +644,10 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 	// create issues if we need to
 	if CreateIssues {
+		Spinner.Start()
 		DebugAndStatus("Attempting to create issues for repositories...")
 		err = ProcessIssues(SourceRestClient, GithubTargetOrg, SourceRepositories)
+		Spinner.Stop()
 		if err != nil {
 			return err
 		}
@@ -886,19 +916,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 		fmt.Sprintf("%d", envResponse.Total_Count),
 	})
 
-	// delay if write was fast
-	elapsed := time.Since(start)
-	if elapsed.Seconds() < 1 {
-		wait := 1000 - elapsed.Milliseconds()
-		Debug(
-			fmt.Sprintf(
-				"Execution time was %v. Waiting for %vms to avoid rate limiting.",
-				elapsed.Seconds(),
-				wait,
-			),
-		)
-		time.Sleep(time.Duration(wait) * time.Millisecond)
-	}
+	SleepIfLongerThan(start)
 
 	// close out this thread
 	WaitGroup.Done()
@@ -990,8 +1008,9 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 
 func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []repository) (err error) {
 
-	var response interface{}
 	for _, repository := range reposToProcess {
+
+		var issuesResponse issues
 
 		if !repository.ExistsInTarget {
 			Debug(
@@ -1011,24 +1030,111 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 
 		query := url.QueryEscape(
 			fmt.Sprintf(
-				"%s repo:%s/%s in:title",
+				"%s repo:%s/%s in:title state:open",
 				DefaultIssueTitleTemplate,
 				targetOrg,
 				repository.Name,
 			),
 		)
 		Debug(fmt.Sprintf("Using search string: %s", query))
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Searching issues in %s/%s",
+				targetOrg,
+				repository.Name,
+			),
+		)
 		err = client.Get(
 			fmt.Sprintf(
 				"search/issues?q=%s",
 				query,
 			),
-			&response,
+			&issuesResponse,
 		)
-		Debug(fmt.Sprintf("Response from GET: %v", response))
+		Debug(fmt.Sprintf("Response from GET: %v", issuesResponse))
+
 		if err != nil {
 			return err
 		}
+
+		// validate rate
+		_, err = ValidateApiRate(client, "core")
+		if err != nil {
+			return err
+		}
+
+		// start timer
+		start := time.Now()
+
+		if issuesResponse.Total_Count == 1 {
+
+			var updateResponse interface{}
+			// find issue number
+			foundIssue := issuesResponse.Items[0]
+			// update an issue
+			updateBody, err := json.Marshal(map[string]string{
+				"body": fmt.Sprintf("test: %s", time.Now()),
+			})
+			if err != nil {
+				return err
+			}
+			updateUrl := fmt.Sprintf(
+				"repos/%s/%s/issues/%d",
+				targetOrg,
+				repository.Name,
+				foundIssue.Number,
+			)
+			DebugAndStatus(fmt.Sprintf("Updating issue on %s", updateUrl))
+			err = client.Patch(
+				updateUrl,
+				bytes.NewBuffer(updateBody),
+				updateResponse,
+			)
+			if err != nil {
+				return err
+			}
+			Debug(fmt.Sprintf("Response from PATCH: %v", updateResponse))
+
+		} else if issuesResponse.Total_Count == 0 {
+
+			var createResponse interface{}
+			// create an issue
+			createBody, err := json.Marshal(map[string]string{
+				"title": DefaultIssueTitleTemplate,
+				"body":  "first test",
+			})
+			if err != nil {
+				return err
+			}
+			createUrl := fmt.Sprintf(
+				"repos/%s/%s/issues",
+				targetOrg,
+				repository.Name,
+			)
+			DebugAndStatus(fmt.Sprintf("Creating issue on %s", createUrl))
+			err = client.Post(
+				createUrl,
+				bytes.NewBuffer(createBody),
+				createResponse,
+			)
+			if err != nil {
+				return err
+			}
+			Debug(fmt.Sprintf("Response from POST: %v", createResponse))
+
+		} else {
+
+			// when more than 1 issue is found
+			Debug(fmt.Sprint(
+				"Could not accurately determine issue to update because multiple ",
+				fmt.Sprintf(
+					"issues with the title '%s' were found.",
+					DefaultIssueTitleTemplate,
+				),
+			))
+		}
+
+		SleepIfLongerThan(start)
 	}
 
 	return err
@@ -1079,19 +1185,7 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 			return err
 		}
 
-		// delay if write was fast
-		elapsed := time.Since(start)
-		if elapsed.Seconds() < 1 {
-			wait := 1000 - elapsed.Milliseconds()
-			Debug(
-				fmt.Sprintf(
-					"Execution time was %v. Waiting for %vms to avoid rate limiting.",
-					elapsed.Seconds(),
-					wait,
-				),
-			)
-			time.Sleep(time.Duration(wait) * time.Millisecond)
-		}
+		SleepIfLongerThan(start)
 	}
 
 	// always return
