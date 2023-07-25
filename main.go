@@ -181,7 +181,7 @@ func init() {
 		"ghes-api-url",
 		DefaultApiUrl,
 		fmt.Sprint(
-			"Required if migrating from GHES. The domain name for your GHES ",
+			"Required if migration source is GHES. The domain name for your GHES ",
 			"instance. For example: ghes.contoso.com",
 		),
 	)

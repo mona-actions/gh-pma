@@ -1,5 +1,5 @@
 # gh-pma
-Post-Migration Audit (PMA) Extension For GitHub CLI. Used to compare GitHub Enterprise (Server or Cloud) to GitHub Enterprise Cloud (includes Managed Users) migrations after using the [GEI](https://github.com/github/gh-gei) tool.
+Post-Migration Audit (PMA) Extension For GitHub CLI. This extension is used to compare GitHub Enterprise (Server or Cloud) to GitHub Enterprise Cloud (includes Managed Users) migrations after using the [GEI](https://github.com/github/gh-gei) tool.
 
 Will report on:
 - Repositories from source exist in target
@@ -58,7 +58,7 @@ Flags:
       --confirm                    Auto respond to visibility alignment confirmation prompt
   -c, --create-csv                 Whether to create a CSV file with the results.
   -i, --create-issues              Whether to create issues in target org repositories or not.
-      --ghes-api-url string        Required if migrating from GHES. The domain name for your GHES instance. For example: ghes.contoso.com (default "github.com")
+      --ghes-api-url string        Required if migration source is GHES. The domain name for your GHES instance. For example: ghes.contoso.com (default "github.com")
       --github-source-org string   Uses GH_SOURCE_PAT env variable or --github-source-pat option. Will fall back to GH_PAT or --github-target-pat if not set.
       --github-source-pat string   
       --github-target-org string   Uses GH_PAT env variable or --github-target-pat option.
