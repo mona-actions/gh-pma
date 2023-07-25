@@ -29,6 +29,7 @@ var (
 	// flag vars
 	AutoConfirm     = false
 	CreateIssues    = false
+	CreateCSV       = false
 	GithubSourceOrg string
 	GithubTargetOrg string
 	ApiUrl          string
@@ -195,10 +196,9 @@ func init() {
 		"",
 		"",
 	)
-	rootCmd.PersistentFlags().IntVarP(
+	rootCmd.PersistentFlags().IntVar(
 		&Threads,
 		"threads",
-		"t",
 		3,
 		fmt.Sprint(
 			"Number of threads to process concurrently. Maximum of 10 allowed. ",
@@ -214,9 +214,16 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(
 		&CreateIssues,
 		"create-issues",
-		"c",
+		"i",
 		false,
 		"Whether to create issues in target org repositories or not.",
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&CreateCSV,
+		"create-csv",
+		"c",
+		false,
+		"Whether to create a CSV file with the results.",
 	)
 
 	// make certain flags required
@@ -606,39 +613,41 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// Create output file
-	outputFile, err := os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".", GithubSourceOrg, ".csv"))
-	if err != nil {
-		return err
-	}
-	defer outputFile.Close()
-
-	// write header
-	_, err = outputFile.WriteString(
-		"repository,exists_in_target,visibility,secrets,variables,environments\n",
-	)
-	if err != nil {
-		OutputError("Error writing to output file.", true)
-	}
-	// write body
-	for _, repository := range SourceRepositories {
-		line := fmt.Sprintf("%s", repository.NameWithOwner)
-		if !IsTargetProvided() {
-			line = fmt.Sprintf("%s%s", line, "Unknown")
-		} else {
-			line = fmt.Sprintf("%s%t", line, repository.ExistsInTarget)
+	if CreateCSV {
+		outputFile, err := os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".", GithubSourceOrg, ".csv"))
+		if err != nil {
+			return err
 		}
-		line = fmt.Sprintf(
-			"%s,%s|%s,%d,%d,%d\n",
-			line,
-			repository.Visibility,
-			repository.TargetVisibility,
-			repository.Secrets.Total_Count,
-			repository.Variables.Total_Count,
-			repository.Environments.Total_Count,
+		defer outputFile.Close()
+
+		// write header
+		_, err = outputFile.WriteString(
+			"repository,exists_in_target,visibility,secrets,variables,environments\n",
 		)
-		_, err = outputFile.WriteString(line)
 		if err != nil {
 			OutputError("Error writing to output file.", true)
+		}
+		// write body
+		for _, repository := range SourceRepositories {
+			line := fmt.Sprintf("%s", repository.NameWithOwner)
+			if !IsTargetProvided() {
+				line = fmt.Sprintf("%s%s", line, "Unknown")
+			} else {
+				line = fmt.Sprintf("%s%t", line, repository.ExistsInTarget)
+			}
+			line = fmt.Sprintf(
+				"%s,%s|%s,%d,%d,%d\n",
+				line,
+				repository.Visibility,
+				repository.TargetVisibility,
+				repository.Secrets.Total_Count,
+				repository.Variables.Total_Count,
+				repository.Environments.Total_Count,
+			)
+			_, err = outputFile.WriteString(line)
+			if err != nil {
+				OutputError("Error writing to output file.", true)
+			}
 		}
 	}
 
