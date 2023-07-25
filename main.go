@@ -1164,6 +1164,11 @@ func ProcessIssues(
 		// start timer
 		start := time.Now()
 
+		// use json marshal indention for JSON
+		variablesIndented, _ := json.MarshalIndent(repository.Variables, "   ", "  ")
+		secretsIndented, _ := json.MarshalIndent(repository.Secrets, "   ", "  ")
+		envIndented, _ := json.MarshalIndent(repository.Environments, "   ", "  ")
+
 		// create a template for the issue
 		issueTemplate := "# Audit Results\n"
 		now := time.Now()
@@ -1180,9 +1185,9 @@ func ProcessIssues(
 		issueTemplate += "- **Migrated From:** [%s](https://github.com/%s)\n"
 		issueTemplate += "- **Source Visibility:** %s\n\n"
 		issueTemplate += "## Items From Source\n"
-		issueTemplate += "- Variables: `%+v`\n"
-		issueTemplate += "- Secrets: `%+v`\n"
-		issueTemplate += "- Environments: `%+v`\n\n"
+		issueTemplate += "- Variables:\n\n   ```\n   %s\n   ```\n"
+		issueTemplate += "- Secrets:\n\n   ```\n   %s\n   ```\n"
+		issueTemplate += "- Environments:\n\n   ```\n   %s\n   ```\n\n"
 		issueTemplate += "## LFS Detection\n"
 		issueTemplate += "Only accounts for `%s` branch.\n\n"
 		decodedLFS, _ := base64.StdEncoding.DecodeString(repository.LFS.Content)
@@ -1197,12 +1202,12 @@ func ProcessIssues(
 		issueBody := fmt.Sprintf(
 			issueTemplate,
 			repository.Owner,
-			repository.DefaultBranchRef.Name,
+			repository.Owner,
 			repository.Visibility,
-			repository.Variables,
-			repository.Secrets,
-			repository.Environments,
-			repository.DefaultBranchRef,
+			variablesIndented,
+			secretsIndented,
+			envIndented,
+			repository.DefaultBranchRef.Name,
 		)
 
 		if issuesResponse.Total_Count == 1 {
