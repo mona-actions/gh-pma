@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -27,6 +28,8 @@ import (
 var (
 	// flag vars
 	AutoConfirm     = false
+	CreateIssues    = false
+	CreateCSV       = false
 	GithubSourceOrg string
 	GithubTargetOrg string
 	ApiUrl          string
@@ -39,18 +42,19 @@ var (
 	)
 
 	// tool vars
-	DefaultApiUrl         string = "github.com"
-	SourceRestClient      api.RESTClient
-	TargetRestClient      api.RESTClient
-	SourceGraphqlClient   api.GQLClient
-	TargetGraphqlClient   api.GQLClient
-	SourceRepositories    []repository = []repository{}
-	TargetRepositories    []repository = []repository{}
-	ToProcessRepositories []repository = []repository{}
-	LogFile               *os.File
-	Threads               int
-	ResultsTable          pterm.TableData
-	WaitGroup             sync.WaitGroup
+	DefaultApiUrl             string = "github.com"
+	DefaultIssueTitleTemplate string = "Post Migration Audit"
+	SourceRestClient          api.RESTClient
+	TargetRestClient          api.RESTClient
+	SourceGraphqlClient       api.GQLClient
+	TargetGraphqlClient       api.GQLClient
+	SourceRepositories        []repository = []repository{}
+	TargetRepositories        []repository = []repository{}
+	ToProcessRepositories     []repository = []repository{}
+	LogFile                   *os.File
+	Threads                   int
+	ResultsTable              pterm.TableData
+	WaitGroup                 sync.WaitGroup
 
 	// Create some colors and a spinner
 	Red     = color.New(color.FgRed).SprintFunc()
@@ -64,7 +68,7 @@ var (
 		Use:           "gh pma",
 		Short:         Description,
 		Long:          Description,
-		Version:       "0.0.6",
+		Version:       "0.0.7",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          Process,
@@ -92,9 +96,20 @@ type apiResponse struct {
 }
 type environments struct {
 	Environments []environment
+	Total_Count  int
 }
 type environment struct {
 	Name string
+}
+type issues struct {
+	Items       []issue
+	Total_Count int
+}
+type issue struct {
+	Title  string
+	ID     int
+	Number int
+	State  string
 }
 type repositoriesPage struct {
 	PageInfo struct {
@@ -113,28 +128,32 @@ type repositoryNode struct {
 }
 type repository struct {
 	Name             string
+	Owner            string
 	NameWithOwner    string
 	Visibility       string
 	TargetVisibility string
 	ExistsInTarget   bool
-	Secrets          int
-	Variables        int
-	Environments     int
+	Secrets          secrets
+	Variables        variables
+	Environments     environments
 }
 type organization struct {
 	Login string
 }
 type secrets struct {
-	Secrets []secret
+	Secrets     []secret
+	Total_Count int
 }
 type secret struct {
 	Name string
 }
 type variables struct {
-	Variables []secret
+	Variables   []variable
+	Total_Count int
 }
 type variable struct {
-	Name string
+	Name  string
+	Value string
 }
 type user struct {
 	Login string
@@ -178,10 +197,9 @@ func init() {
 		"",
 		"",
 	)
-	rootCmd.PersistentFlags().IntVarP(
+	rootCmd.PersistentFlags().IntVar(
 		&Threads,
 		"threads",
-		"t",
 		3,
 		fmt.Sprint(
 			"Number of threads to process concurrently. Maximum of 10 allowed. ",
@@ -192,7 +210,21 @@ func init() {
 		&AutoConfirm,
 		"confirm",
 		false,
-		"Auto respond to confirmation prompt",
+		"Auto respond to visibility alignment confirmation prompt",
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&CreateIssues,
+		"create-issues",
+		"i",
+		false,
+		"Whether to create issues in target org repositories or not.",
+	)
+	rootCmd.PersistentFlags().BoolVarP(
+		&CreateCSV,
+		"create-csv",
+		"c",
+		false,
+		"Whether to create a CSV file with the results.",
 	)
 
 	// make certain flags required
@@ -299,6 +331,14 @@ func Debug(message string) string {
 	return message
 }
 
+func DisplayRateLeft() {
+	// validate we have API attempts left
+	rateLeft, _ := ValidateApiRate(SourceRestClient, "core")
+	rateMessage := Cyan("API Rate Limit Left:")
+	OutputNotice(fmt.Sprintf("%s %d", rateMessage, rateLeft))
+	LF()
+}
+
 func IsTargetProvided() bool {
 	if GithubTargetOrg != "" {
 		return true
@@ -364,6 +404,22 @@ func StripAnsi(str string) string {
 	ansi := "[\u001B\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PRZcf-ntqry=><~]))"
 	regex := regexp.MustCompile(ansi)
 	return regex.ReplaceAllString(str, "")
+}
+
+func SleepIfLongerThan(thisTime time.Time) {
+	// delay if write was fast
+	elapsed := time.Since(thisTime)
+	if elapsed.Seconds() < 1 {
+		wait := 1000 - elapsed.Milliseconds()
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Execution time was %v. Waiting for %vms to avoid rate limiting.",
+				elapsed.Seconds(),
+				wait,
+			),
+		)
+		time.Sleep(time.Duration(wait) * time.Millisecond)
+	}
 }
 
 func Process(cmd *cobra.Command, args []string) (err error) {
@@ -440,7 +496,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	}
 	OutputFlags("Read Threads", fmt.Sprintf("%d", Threads))
 	LF()
-	Debug("---- LISTING REPOSITORIES ----")
+	Debug("---- SETTING UP API CLIENTS ----")
 
 	// set up clients
 	opts := GetOpts(ApiUrl, GithubSourcePat)
@@ -469,28 +525,21 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		OutputError("Failed set set up target GraphQL client.", true)
 	}
 
+	Debug("---- LOOKING UP REPOSITORIES IN ORGS ----")
+
 	Spinner.Start()
 
-	// determine how many concurrent lookups can take place
-	lookGroups := 1
-	if IsTargetProvided() {
-		lookGroups = 2
-	}
-	WaitGroup.Add(lookGroups)
-
-	// get source (and possible target) repositories
+	// thread getting repos
+	WaitGroup.Add(2)
 	go GetSourceRepositories()
 	if err != nil {
 		Debug(fmt.Sprint("Error object: ", err))
 		OutputError("Failed to get source repositories.", true)
 	}
-
-	if IsTargetProvided() {
-		go GetTargetRepositories()
-		if err != nil {
-			Debug(fmt.Sprint("Error object: ", err))
-			OutputError("Failed to get target repositories.", true)
-		}
+	go GetTargetRepositories()
+	if err != nil {
+		Debug(fmt.Sprint("Error object: ", err))
+		OutputError("Failed to get target repositories.", true)
 	}
 	WaitGroup.Wait()
 
@@ -573,45 +622,67 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	// Create output file
-	outputFile, err := os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".", GithubSourceOrg, ".csv"))
-	if err != nil {
-		return err
-	}
-	defer outputFile.Close()
-
-	// write header
-	_, err = outputFile.WriteString("repository,exists_in_target,visibility,secrets,variables,environments\n")
-	if err != nil {
-		OutputError("Error writing to output file.", true)
-	}
-	// write body
-	for _, repository := range SourceRepositories {
-		line := fmt.Sprintf("%s", repository.NameWithOwner)
-		if !IsTargetProvided() {
-			line = fmt.Sprintf("%s%s", line, "Unknown")
-		} else {
-			line = fmt.Sprintf("%s%t", line, repository.ExistsInTarget)
+	if CreateCSV {
+		outputFile, err := os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".", GithubSourceOrg, ".csv"))
+		if err != nil {
+			return err
 		}
-		line = fmt.Sprintf(
-			"%s,%s|%s,%d,%d,%d\n",
-			line,
-			repository.Visibility,
-			repository.TargetVisibility,
-			repository.Secrets,
-			repository.Variables,
-			repository.Environments,
+		defer outputFile.Close()
+
+		// write header
+		_, err = outputFile.WriteString(
+			"repository,exists_in_target,visibility,secrets,variables,environments\n",
 		)
-		_, err = outputFile.WriteString(line)
 		if err != nil {
 			OutputError("Error writing to output file.", true)
+		}
+		// write body
+		for _, repository := range SourceRepositories {
+			line := fmt.Sprintf("%s", repository.NameWithOwner)
+			if !IsTargetProvided() {
+				line = fmt.Sprintf("%s%s", line, "Unknown")
+			} else {
+				line = fmt.Sprintf("%s%t", line, repository.ExistsInTarget)
+			}
+			line = fmt.Sprintf(
+				"%s,%s|%s,%d,%d,%d\n",
+				line,
+				repository.Visibility,
+				repository.TargetVisibility,
+				repository.Secrets.Total_Count,
+				repository.Variables.Total_Count,
+				repository.Environments.Total_Count,
+			)
+			_, err = outputFile.WriteString(line)
+			if err != nil {
+				OutputError("Error writing to output file.", true)
+			}
+		}
+	}
+
+	// create issues if we need to
+	if CreateIssues {
+		Spinner.Start()
+		DebugAndStatus("Attempting to create issues for repositories...")
+		err = ProcessIssues(SourceRestClient, GithubTargetOrg, SourceRepositories)
+		Spinner.Stop()
+		if err != nil {
+			return err
 		}
 	}
 
 	// prompt for fixing
 	if len(ToProcessRepositories) > 0 {
+
+		// find out if we need to process visibility
+		repoWord := "repository"
+		if len(ToProcessRepositories) > 1 {
+			repoWord = "repositories"
+		}
 		proceedMessage := Debug(fmt.Sprintf(
-			"Do you want to align repository visibilities for %d repositories?",
+			"Do you want to align visibility for %d %s?",
 			len(ToProcessRepositories),
+			repoWord,
 		))
 
 		// auto confirm
@@ -619,13 +690,14 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		if !AutoConfirm {
 			c, err = AskForConfirmation(Yellow(proceedMessage))
 		}
-
-		// fail if something goes wrong
 		if err != nil {
 			OutputError(err.Error(), true)
 		} else if !c {
 			// warn when manually abandoned
+			LF()
 			OutputWarning("Alignment process abandoned.")
+			LF()
+			DisplayRateLeft()
 			return err
 		}
 
@@ -640,20 +712,18 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 		// on successful processing
 		if err == nil {
+			LF()
 			OutputNotice(
 				fmt.Sprintf(
 					"Successfully processed %d repositories.",
 					len(ToProcessRepositories),
 				),
 			)
+			LF()
 		}
 	}
 
-	// validate we have API attempts left
-	rateLeft, _ := ValidateApiRate(SourceRestClient, "core")
-	rateMessage := Cyan("API Rate Limit Left:")
-	OutputNotice(fmt.Sprintf("%s %d", rateMessage, rateLeft))
-	LF()
+	DisplayRateLeft()
 
 	// always return
 	return err
@@ -734,7 +804,6 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	start := time.Now()
 
 	// get number of secrets
-	secretCount := 0
 	var secretsResponse secrets
 	secretsErr := client.Get(
 		fmt.Sprintf(
@@ -751,8 +820,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	if secretsErr != nil {
 		ExitManual(secretsErr)
 	} else {
-		secretCount = len(secretsResponse.Secrets)
-		repoToProcess.Secrets = secretCount
+		repoToProcess.Secrets = secretsResponse
 	}
 
 	// validate we have API attempts left
@@ -763,7 +831,6 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	}
 
 	// get number of variables
-	variableCount := 0
 	var variablesResponse variables
 	variablesErr := client.Get(
 		fmt.Sprintf(
@@ -780,8 +847,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	if variablesErr != nil {
 		ExitManual(variablesErr)
 	} else {
-		variableCount = len(variablesResponse.Variables)
-		repoToProcess.Variables = variableCount
+		repoToProcess.Variables = variablesResponse
 	}
 
 	// validate we have API attempts left
@@ -791,7 +857,6 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	}
 
 	// get number of variables
-	envCount := 0
 	var envResponse environments
 	envsErr := client.Get(
 		fmt.Sprintf(
@@ -808,8 +873,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	if envsErr != nil {
 		ExitManual(envsErr)
 	} else {
-		envCount = len(envResponse.Environments)
-		repoToProcess.Environments = envCount
+		repoToProcess.Environments = envResponse
 	}
 
 	// find if repo exists in target
@@ -847,38 +911,29 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 
 	// write to table for output
 	visiblity := fmt.Sprintf(
-		"%s|%s",
+		"%s",
 		repoToProcess.Visibility,
-		repoToProcess.TargetVisibility,
 	)
 	existsInTarget := strconv.FormatBool(repoToProcess.ExistsInTarget)
 	if !repoToProcess.ExistsInTarget {
 		existsInTarget = Red(existsInTarget)
 	} else if repoToProcess.Visibility != TargetRepositories[targetIdx].Visibility {
-		visiblity = Yellow(visiblity)
+		visiblity = fmt.Sprintf(
+			"%s|%s",
+			visiblity,
+			Yellow(repoToProcess.TargetVisibility),
+		)
 	}
 	ResultsTable = append(ResultsTable, []string{
 		repoToProcess.NameWithOwner,
 		existsInTarget,
-		visiblity,
-		fmt.Sprintf("%d", secretCount),
-		fmt.Sprintf("%d", variableCount),
-		fmt.Sprintf("%d", envCount),
+		strings.ToLower(visiblity),
+		fmt.Sprintf("%d", secretsResponse.Total_Count),
+		fmt.Sprintf("%d", variablesResponse.Total_Count),
+		fmt.Sprintf("%d", envResponse.Total_Count),
 	})
 
-	// delay if write was fast
-	elapsed := time.Since(start)
-	if elapsed.Seconds() < 1 {
-		wait := 1000 - elapsed.Milliseconds()
-		Debug(
-			fmt.Sprintf(
-				"Execution time was %v. Waiting for %vms to avoid rate limiting.",
-				elapsed.Seconds(),
-				wait,
-			),
-		)
-		time.Sleep(time.Duration(wait) * time.Millisecond)
-	}
+	SleepIfLongerThan(start)
 
 	// close out this thread
 	WaitGroup.Done()
@@ -948,6 +1003,7 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 		for _, repoNode := range query.Organization.Repositories.Nodes {
 			var repoClone repository
 			repoClone.Name = repoNode.Name
+			repoClone.Owner = repoNode.Owner.Login
 			repoClone.NameWithOwner = repoNode.NameWithOwner
 			repoClone.Visibility = repoNode.Visibility
 			repoLookup = append(repoLookup, repoClone)
@@ -966,6 +1022,169 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 	}
 
 	return repoLookup, err
+}
+
+func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []repository) (err error) {
+
+	for _, repository := range reposToProcess {
+
+		var issuesResponse issues
+
+		if !repository.ExistsInTarget {
+			Debug(
+				fmt.Sprintf(
+					"Skipped %s because it did not exist in the target org.",
+					repository.Name,
+				),
+			)
+			continue
+		}
+
+		// validate rate
+		_, err := ValidateApiRate(client, "core")
+		if err != nil {
+			return err
+		}
+
+		query := url.QueryEscape(
+			fmt.Sprintf(
+				"%s repo:%s/%s in:title state:open",
+				DefaultIssueTitleTemplate,
+				targetOrg,
+				repository.Name,
+			),
+		)
+		Debug(fmt.Sprintf("Using search string: %s", query))
+		DebugAndStatus(
+			fmt.Sprintf(
+				"Searching issues in %s/%s",
+				targetOrg,
+				repository.Name,
+			),
+		)
+		err = client.Get(
+			fmt.Sprintf(
+				"search/issues?q=%s",
+				query,
+			),
+			&issuesResponse,
+		)
+		Debug(fmt.Sprintf("Response from GET: %v", issuesResponse))
+
+		if err != nil {
+			return err
+		}
+
+		// validate rate
+		_, err = ValidateApiRate(client, "core")
+		if err != nil {
+			return err
+		}
+
+		// start timer
+		start := time.Now()
+
+		// create a template for the issue
+		issueTemplate := "# Audit Results\n"
+		now := time.Now()
+		tz, _ := now.Zone()
+		issueTemplate += fmt.Sprintf(
+			"Audit last performed on %s at %s %s.\n\n",
+			now.Format("2006-01-02"),
+			now.Format("15:04:05"),
+			tz,
+		)
+		issueTemplate += "See below for migration details and whether "
+		issueTemplate += "you need to mitigate any items.\n\n"
+		issueTemplate += "## Details\n"
+		issueTemplate += "- **Migrated From:** [%s](https://github.com/%s)\n"
+		issueTemplate += "- **Source Visibility:** %s\n\n"
+		issueTemplate += "## Items From Source\n"
+		issueTemplate += "- Variables: `%+v`\n"
+		issueTemplate += "- Secrets: `%+v`\n"
+		issueTemplate += "- Environments: `%+v`\n"
+		issueBody := fmt.Sprintf(
+			issueTemplate,
+			repository.Owner,
+			repository.Owner,
+			repository.Visibility,
+			repository.Variables,
+			repository.Secrets,
+			repository.Environments,
+		)
+
+		if issuesResponse.Total_Count == 1 {
+
+			var updateResponse interface{}
+			// find issue number
+			foundIssue := issuesResponse.Items[0]
+			// update an issue
+			updateBody, err := json.Marshal(map[string]string{
+				"body": issueBody,
+			})
+			if err != nil {
+				return err
+			}
+			updateUrl := fmt.Sprintf(
+				"repos/%s/%s/issues/%d",
+				targetOrg,
+				repository.Name,
+				foundIssue.Number,
+			)
+			DebugAndStatus(fmt.Sprintf("Updating issue on %s", updateUrl))
+			err = client.Patch(
+				updateUrl,
+				bytes.NewBuffer(updateBody),
+				updateResponse,
+			)
+			if err != nil {
+				return err
+			}
+			Debug(fmt.Sprintf("Response from PATCH: %v", updateResponse))
+
+		} else if issuesResponse.Total_Count == 0 {
+
+			var createResponse interface{}
+			// create an issue
+			createBody, err := json.Marshal(map[string]string{
+				"title": DefaultIssueTitleTemplate,
+				"body":  issueBody,
+			})
+			if err != nil {
+				return err
+			}
+			createUrl := fmt.Sprintf(
+				"repos/%s/%s/issues",
+				targetOrg,
+				repository.Name,
+			)
+			DebugAndStatus(fmt.Sprintf("Creating issue on %s", createUrl))
+			err = client.Post(
+				createUrl,
+				bytes.NewBuffer(createBody),
+				createResponse,
+			)
+			if err != nil {
+				return err
+			}
+			Debug(fmt.Sprintf("Response from POST: %v", createResponse))
+
+		} else {
+
+			// when more than 1 issue is found
+			Debug(fmt.Sprint(
+				"Could not accurately determine issue to update because multiple ",
+				fmt.Sprintf(
+					"issues with the title '%s' were found.",
+					DefaultIssueTitleTemplate,
+				),
+			))
+		}
+
+		SleepIfLongerThan(start)
+	}
+
+	return err
 }
 
 func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, reposToProcess []repository) (err error) {
@@ -1013,19 +1232,7 @@ func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, repo
 			return err
 		}
 
-		// delay if write was fast
-		elapsed := time.Since(start)
-		if elapsed.Seconds() < 1 {
-			wait := 1000 - elapsed.Milliseconds()
-			Debug(
-				fmt.Sprintf(
-					"Execution time was %v. Waiting for %vms to avoid rate limiting.",
-					elapsed.Seconds(),
-					wait,
-				),
-			)
-			time.Sleep(time.Duration(wait) * time.Millisecond)
-		}
+		SleepIfLongerThan(start)
 	}
 
 	// always return
