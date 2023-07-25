@@ -43,6 +43,8 @@ var (
 	)
 
 	// tool vars
+
+	AnsiRegex                 string
 	DefaultApiUrl             string = "github.com"
 	DefaultIssueTitleTemplate string = "Post Migration Audit"
 	SourceRestClient          api.RESTClient
@@ -78,7 +80,7 @@ var (
 
 type repositoryQuery struct {
 	Organization struct {
-		Repositories repositoriesPage `graphql:"repositories(first: 100, after: $page, orderBy: {field: NAME, direction: ASC})"`
+		Repos repoPage `graphql:"repositories(first: 100, after: $page)"`
 	} `graphql:"organization(login: $owner)"`
 }
 type rateResponse struct {
@@ -115,18 +117,18 @@ type issue struct {
 	Number int
 	State  string
 }
-type repositoriesPage struct {
+type repoPage struct {
 	PageInfo struct {
 		HasNextPage bool
 		EndCursor   graphql.String
 	}
-	Nodes []repositoryNode
+	Nodes []repoNode
 }
 
 type branchRef struct {
 	Name string
 }
-type repositoryNode struct {
+type repoNode struct {
 	Name             string
 	NameWithOwner    string
 	Visibility       string
@@ -247,6 +249,13 @@ func init() {
 
 	// add args here
 	rootCmd.Args = cobra.MaximumNArgs(0)
+
+	// set ANSI regex
+	AnsiRegex = "[\u001B\u009B]"
+	AnsiRegex += "[[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]"
+	AnsiRegex += "*(?:;[a-zA-Z\\d]*)*)?\u0007)"
+	AnsiRegex += "|(?:(?:\\d{1,4}(?:;\\d{0,4})*)"
+	AnsiRegex += "?[\\dA-PRZcf-ntqry=><~]))"
 }
 
 func main() {
@@ -410,8 +419,7 @@ func Truncate(str string, limit int) string {
 }
 
 func StripAnsi(str string) string {
-	ansi := "[\u001B\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[a-zA-Z\\d]*)*)?\u0007)|(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PRZcf-ntqry=><~]))"
-	regex := regexp.MustCompile(ansi)
+	regex := regexp.MustCompile(AnsiRegex)
 	return regex.ReplaceAllString(str, "")
 }
 
@@ -434,7 +442,12 @@ func SleepIfLongerThan(thisTime time.Time) {
 func Process(cmd *cobra.Command, args []string) (err error) {
 
 	// Create log file
-	LogFile, err = os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".pma.log"))
+	LogFile, err = os.Create(
+		fmt.Sprint(
+			time.Now().Format("20060102150401"),
+			".pma.log",
+		),
+	)
 	if err != nil {
 		return err
 	}
@@ -580,10 +593,13 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 		if repositoriesLeft < Threads {
 			batchThreads = repositoriesLeft
 			Debug(
-				fmt.Sprintf(
-					"Setting number of threads to %d because there are only %d repositories left.",
-					repositoriesLeft,
-					repositoriesLeft,
+				fmt.Sprint(
+					"Setting number of threads to",
+					fmt.Sprintf(
+						" %d because there are only %d repositories left.",
+						repositoriesLeft,
+						repositoriesLeft,
+					),
 				),
 			)
 		}
@@ -625,7 +641,9 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 	// output table
 	if len(SourceRepositories) > 0 {
-		pterm.DefaultTable.WithHasHeader().WithHeaderRowSeparator("-").WithData(ResultsTable).Render()
+		pterm.DefaultTable.WithHasHeader().
+			WithHeaderRowSeparator("-").
+			WithData(ResultsTable).Render()
 	} else {
 		OutputNotice("No repositories found.")
 		return err
@@ -633,7 +651,14 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 	// Create output file
 	if CreateCSV {
-		outputFile, err := os.Create(fmt.Sprint(time.Now().Format("20060102150401"), ".", GithubSourceOrg, ".csv"))
+		outputFile, err := os.Create(
+			fmt.Sprint(
+				time.Now().Format("20060102150401"),
+				".",
+				GithubSourceOrg,
+				".csv",
+			),
+		)
 		if err != nil {
 			return err
 		}
@@ -641,7 +666,15 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 		// write header
 		_, err = outputFile.WriteString(
-			"repository,exists_in_target,default_branch,visibility,secrets,variables,environments\n",
+			fmt.Sprint(
+				"repository,",
+				"exists_in_target,",
+				"default_branch,",
+				"visibility,",
+				"secrets,",
+				"variables,",
+				"environments\n",
+			),
 		)
 		if err != nil {
 			OutputError("Error writing to output file.", true)
@@ -740,7 +773,11 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 	return err
 }
 
-func ValidateApiRate(client api.RESTClient, requestType string) (left int, err error) {
+func ValidateApiRate(
+	client api.RESTClient,
+	requestType string,
+) (left int, err error) {
+
 	apiResponse := apiResponse{}
 	attempts := 0
 	rateRemaining := 0
@@ -787,9 +824,10 @@ func ValidateApiRate(client api.RESTClient, requestType string) (left int, err e
 		if rateRemaining <= 0 {
 			attempts++
 			DebugAndStatus(
-				fmt.Sprintf(
+				fmt.Sprint(
+					"API rate limit ",
 					fmt.Sprintf(
-						"API rate limit (%s) has none remaining. Sleeping for 15 seconds (attempt #%d)",
+						"(%s) has none remaining. Sleeping for 15 seconds (attempt #%d)",
 						requestType,
 						attempts,
 					),
@@ -904,18 +942,18 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	repoToProcess.LFS = fileResponse
 
 	// find if repo exists in target
-	targetIdx := slices.IndexFunc(TargetRepositories, func(r repository) bool {
+	tIdx := slices.IndexFunc(TargetRepositories, func(r repository) bool {
 		return r.Name == repoToProcess.Name
 	})
-	if targetIdx < 0 {
+	if tIdx < 0 {
 		repoToProcess.ExistsInTarget = false
 		repoToProcess.TargetVisibility = fmt.Sprintf("UNKNOWN")
 	} else {
 		repoToProcess.ExistsInTarget = true
-		repoToProcess.TargetVisibility = TargetRepositories[targetIdx].Visibility
+		repoToProcess.TargetVisibility = TargetRepositories[tIdx].Visibility
 
 		// add this repo to array of processing if visibilties don't match
-		if repoToProcess.Visibility != TargetRepositories[targetIdx].Visibility {
+		if repoToProcess.Visibility != TargetRepositories[tIdx].Visibility {
 			ToProcessRepositories = append(ToProcessRepositories, repoToProcess)
 		}
 	}
@@ -944,7 +982,7 @@ func GetRepositoryStatistics(client api.RESTClient, repoToProcess repository) {
 	existsInTarget := strconv.FormatBool(repoToProcess.ExistsInTarget)
 	if !repoToProcess.ExistsInTarget {
 		existsInTarget = Red(existsInTarget)
-	} else if repoToProcess.Visibility != TargetRepositories[targetIdx].Visibility {
+	} else if repoToProcess.Visibility != TargetRepositories[tIdx].Visibility {
 		visiblity = fmt.Sprintf(
 			"%s|%s",
 			visiblity,
@@ -993,7 +1031,11 @@ func GetTargetRepositories() {
 	WaitGroup.Done()
 }
 
-func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, owner string) ([]repository, error) {
+func GetRepositories(
+	restClient api.RESTClient,
+	graphqlClient api.GQLClient,
+	owner string,
+) ([]repository, error) {
 
 	repoLookup := []repository{}
 	query := repositoryQuery{}
@@ -1028,7 +1070,7 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 		graphqlClient.Query("RepoList", &query, variables)
 
 		// clone the objects (keeping just the name)
-		for _, repoNode := range query.Organization.Repositories.Nodes {
+		for _, repoNode := range query.Organization.Repos.Nodes {
 			var repoClone repository
 			repoClone.Name = repoNode.Name
 			repoClone.Owner = repoNode.Owner.Login
@@ -1041,24 +1083,28 @@ func GetRepositories(restClient api.RESTClient, graphqlClient api.GQLClient, own
 		Debug(
 			fmt.Sprintf(
 				"GraphQL Repository Query Response: %+v",
-				query.Organization.Repositories,
+				query.Organization.Repos,
 			),
 		)
 
 		// if no next page is found, break
-		if !query.Organization.Repositories.PageInfo.HasNextPage {
+		if !query.Organization.Repos.PageInfo.HasNextPage {
 			break
 		}
 		i++
 
 		// set the end cursor for the page we are on
-		variables["page"] = query.Organization.Repositories.PageInfo.EndCursor
+		variables["page"] = query.Organization.Repos.PageInfo.EndCursor
 	}
 
 	return repoLookup, err
 }
 
-func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []repository) (err error) {
+func ProcessIssues(
+	client api.RESTClient,
+	targetOrg string,
+	reposToProcess []repository,
+) (err error) {
 
 	for _, repository := range reposToProcess {
 
@@ -1233,7 +1279,11 @@ func ProcessIssues(client api.RESTClient, targetOrg string, reposToProcess []rep
 	return err
 }
 
-func ProcessRepositoryVisibilities(client api.RESTClient, targetOrg string, reposToProcess []repository) (err error) {
+func ProcessRepositoryVisibilities(
+	client api.RESTClient,
+	targetOrg string,
+	reposToProcess []repository,
+) (err error) {
 
 	var response interface{}
 	for _, repository := range reposToProcess {
