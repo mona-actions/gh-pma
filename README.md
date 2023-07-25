@@ -20,7 +20,7 @@ The tool could be expanded to include other non-migratable settings (see [what i
 - Add detection of:
    - Codespaces Secrets
    - Dependabot Secrets
-   - Environmen Secrets & Vars (currently just Environments are detected)
+   - Environment Secrets & Vars (currently just Environments are detected)
 
 ## Prerequisites
 - [GitHub CLI](https://cli.github.com/manual/installation) installed.
