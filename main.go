@@ -380,6 +380,17 @@ func LF() {
 	fmt.Println("")
 }
 
+func LFSExists(base64File string) (string, bool, error) {
+	decodedContents, err := base64.StdEncoding.DecodeString(base64File)
+	if err != nil {
+		return "", false, err
+	}
+	if strings.Contains(string(decodedContents), "filter=lfs") {
+		return string(decodedContents), true, err
+	}
+	return string(decodedContents), false, err
+}
+
 func Log(message string) {
 	if message != "" {
 		message = fmt.Sprint(
@@ -666,14 +677,15 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 
 		// write header
 		_, err = outputFile.WriteString(
-			fmt.Sprint(
+			fmt.Sprintln(
 				"repository,",
 				"exists_in_target,",
 				"default_branch,",
 				"visibility,",
 				"secrets,",
 				"variables,",
-				"environments\n",
+				"environments",
+				"lfs",
 			),
 		)
 		if err != nil {
@@ -687,8 +699,13 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 			} else {
 				line = fmt.Sprintf("%s,%t", line, repository.ExistsInTarget)
 			}
+			_, foundLFS, _ := LFSExists(repository.LFS.Content)
+			lfsString := "No"
+			if foundLFS {
+				lfsString = "Potentially"
+			}
 			line = fmt.Sprintf(
-				"%s,%s,%s|%s,%d,%d,%d\n",
+				"%s,%s,%s|%s,%d,%d,%d,%s\n",
 				line,
 				repository.DefaultBranchRef.Name,
 				repository.Visibility,
@@ -696,6 +713,7 @@ func Process(cmd *cobra.Command, args []string) (err error) {
 				repository.Secrets.Total_Count,
 				repository.Variables.Total_Count,
 				repository.Environments.Total_Count,
+				lfsString,
 			)
 			_, err = outputFile.WriteString(line)
 			if err != nil {
@@ -1165,49 +1183,68 @@ func ProcessIssues(
 		start := time.Now()
 
 		// use json marshal indention for JSON
-		variablesIndented, _ := json.MarshalIndent(repository.Variables, "   ", "  ")
-		secretsIndented, _ := json.MarshalIndent(repository.Secrets, "   ", "  ")
-		envIndented, _ := json.MarshalIndent(repository.Environments, "   ", "  ")
+		varIndented, _ := json.MarshalIndent(repository.Variables, "", "  ")
+		secIndented, _ := json.MarshalIndent(repository.Secrets, "", "  ")
+		envIndented, _ := json.MarshalIndent(repository.Environments, "", "  ")
 
-		// create a template for the issue
-		issueTemplate := "# Audit Results\n"
+		// set some time zone info
 		now := time.Now()
 		tz, _ := now.Zone()
-		issueTemplate += fmt.Sprintf(
-			"Audit last performed on %s at %s %s.\n\n",
+
+		// create a template
+		issueTemplate := `# Audit Results
+Audit last performed on %s at %s %s.
+
+See below for migration details and whether you need to mitigate any items.
+
+## Details
+- **Migrated From:** [%s](https://github.com/%s)
+- **Source Visibility:** [%s](https://github.com/%s/settings/#danger-zone)
+
+## Items From Source
+### [Variables](https://github.com/%s/settings/secrets/actions)
+
+%s
+### [Secrets](https://github.com/%s/settings/secrets/variables)
+
+%s
+### [Environments](https://github.com/%s/settings/environments)
+
+%s
+## LFS Detection
+*Only accounts for %s branch.*
+
+%s`
+
+		// build a string for LFS output ahead of time
+		decodedLFS, foundLFS, _ := LFSExists(repository.LFS.Content)
+		lfsString := "No LFS declaration detected in `.gitattributes`\n"
+		if foundLFS {
+			lfsString = "Validate the paths referenced in `.gitattributes`:\n"
+			lfsString += "```\n"
+			lfsString += string(decodedLFS)
+			lfsString += "```\n"
+		}
+
+		// replace values in template
+		newRepoAndOwner := fmt.Sprint(targetOrg, "/", repository.Name)
+		issueBody := fmt.Sprintf(
+			issueTemplate,
 			now.Format("2006-01-02"),
 			now.Format("15:04:05"),
 			tz,
-		)
-		issueTemplate += "See below for migration details and whether "
-		issueTemplate += "you need to mitigate any items.\n\n"
-		issueTemplate += "## Details\n"
-		issueTemplate += "- **Migrated From:** [%s](https://github.com/%s)\n"
-		issueTemplate += "- **Source Visibility:** %s\n\n"
-		issueTemplate += "## Items From Source\n"
-		issueTemplate += "- Variables:\n\n   ```\n   %s\n   ```\n"
-		issueTemplate += "- Secrets:\n\n   ```\n   %s\n   ```\n"
-		issueTemplate += "- Environments:\n\n   ```\n   %s\n   ```\n\n"
-		issueTemplate += "## LFS Detection\n"
-		issueTemplate += "Only accounts for `%s` branch.\n\n"
-		decodedLFS, _ := base64.StdEncoding.DecodeString(repository.LFS.Content)
-		if strings.Contains(string(decodedLFS), "filter=lfs") {
-			issueTemplate += "Validate the paths referenced in `.gitattributes`:\n"
-			issueTemplate += "```\n"
-			issueTemplate += string(decodedLFS)
-			issueTemplate += "```\n"
-		} else {
-			issueTemplate += "No LFS declaration detected in `.gitattributes`\n"
-		}
-		issueBody := fmt.Sprintf(
-			issueTemplate,
 			repository.Owner,
-			repository.Owner,
-			repository.Visibility,
-			variablesIndented,
-			secretsIndented,
-			envIndented,
+			repository.NameWithOwner,
+			strings.ToLower(repository.Visibility),
+			newRepoAndOwner,
+			newRepoAndOwner,
+			fmt.Sprint("```\n", string(varIndented), "\n```"),
+			newRepoAndOwner,
+			fmt.Sprint("```\n", string(secIndented), "\n```"),
+			newRepoAndOwner,
+			fmt.Sprint("```\n", string(envIndented), "\n```"),
 			repository.DefaultBranchRef.Name,
+			lfsString,
 		)
 
 		if issuesResponse.Total_Count == 1 {
