@@ -71,7 +71,7 @@ var (
 		Use:           "gh pma",
 		Short:         DefaultBranchRef,
 		Long:          DefaultBranchRef,
-		Version:       "0.0.8",
+		Version:       "1.0.0",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          Process,
